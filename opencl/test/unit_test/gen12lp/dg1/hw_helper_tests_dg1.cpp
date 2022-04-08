@@ -1,54 +1,78 @@
 /*
- * Copyright (C) 2020 Intel Corporation
+ * Copyright (C) 2020-2022 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
  */
 
-#include "opencl/test/unit_test/helpers/hw_helper_tests.h"
+#include "shared/source/os_interface/hw_info_config.h"
+#include "shared/test/common/helpers/hw_helper_tests.h"
+#include "shared/test/common/mocks/mock_graphics_allocation.h"
+
+#include "opencl/source/helpers/cl_hw_helper.h"
 
 using HwHelperTestDg1 = HwHelperTest;
 
-DG1TEST_F(HwHelperTestDg1, givenDg1PlatformWhenIsLocalMemoryEnabledIsCalledThenTrueIsReturned) {
-    hardwareInfo.featureTable.ftrLocalMemory = true;
-
-    auto &helper = reinterpret_cast<HwHelperHw<FamilyType> &>(HwHelperHw<FamilyType>::get());
-    EXPECT_TRUE(helper.isLocalMemoryEnabled(hardwareInfo));
-}
-
-DG1TEST_F(HwHelperTestDg1, givenDg1PlatformWithoutLocalMemoryFeatureWhenIsLocalMemoryEnabledIsCalledThenFalseIsReturned) {
-    hardwareInfo.featureTable.ftrLocalMemory = false;
-
-    auto &helper = reinterpret_cast<HwHelperHw<FamilyType> &>(HwHelperHw<FamilyType>::get());
-    EXPECT_FALSE(helper.isLocalMemoryEnabled(hardwareInfo));
-}
-
-DG1TEST_F(HwHelperTestDg1, givenDg1PlatformWhenSetupHardwareCapabilitiesIsCalledThenThenSpecificImplementationIsUsed) {
-    hardwareInfo.featureTable.ftrLocalMemory = true;
-
-    HardwareCapabilities hwCaps = {0};
+DG1TEST_F(HwHelperTestDg1, givenDg1SteppingA0WhenAdjustDefaultEngineTypeCalledThenRcsIsReturned) {
     auto &helper = HwHelper::get(renderCoreFamily);
-    helper.setupHardwareCapabilities(&hwCaps, hardwareInfo);
+    const auto &hwInfoConfig = *HwInfoConfig::get(productFamily);
+    hardwareInfo.featureTable.flags.ftrCCSNode = true;
+    hardwareInfo.platform.usRevId = hwInfoConfig.getHwRevIdFromStepping(REVISION_A0, hardwareInfo);
 
-    EXPECT_EQ(2048u, hwCaps.image3DMaxHeight);
-    EXPECT_EQ(2048u, hwCaps.image3DMaxWidth);
-    EXPECT_TRUE(hwCaps.isStatelesToStatefullWithOffsetSupported);
-}
-
-DG1TEST_F(HwHelperTestDg1, givenDg1A0WhenAdjustDefaultEngineTypeCalledThenRcsIsReturned) {
-    hardwareInfo.featureTable.ftrCCSNode = true;
-    hardwareInfo.platform.usRevId = REVISION_A0;
-
-    auto &helper = HwHelper::get(renderCoreFamily);
     helper.adjustDefaultEngineType(&hardwareInfo);
     EXPECT_EQ(aub_stream::ENGINE_RCS, hardwareInfo.capabilityTable.defaultEngineType);
 }
 
-DG1TEST_F(HwHelperTestDg1, givenDg1BWhenAdjustDefaultEngineTypeCalledThenCcsIsReturned) {
-    hardwareInfo.featureTable.ftrCCSNode = true;
-    hardwareInfo.platform.usRevId = REVISION_B;
-
+DG1TEST_F(HwHelperTestDg1, givenDg1SteppingBWhenAdjustDefaultEngineTypeCalledThenRcsIsReturned) {
     auto &helper = HwHelper::get(renderCoreFamily);
+    const auto &hwInfoConfig = *HwInfoConfig::get(productFamily);
+    hardwareInfo.featureTable.flags.ftrCCSNode = true;
+    hardwareInfo.platform.usRevId = hwInfoConfig.getHwRevIdFromStepping(REVISION_B, hardwareInfo);
+
     helper.adjustDefaultEngineType(&hardwareInfo);
     EXPECT_EQ(aub_stream::ENGINE_RCS, hardwareInfo.capabilityTable.defaultEngineType);
+}
+
+DG1TEST_F(HwHelperTestDg1, givenDg1AndVariousSteppingsWhenGettingIsWorkaroundRequiredThenCorrectValueIsReturned) {
+    const auto &hwHelper = HwHelper::get(hardwareInfo.platform.eRenderCoreFamily);
+    const auto &hwInfoConfig = *HwInfoConfig::get(hardwareInfo.platform.eProductFamily);
+    uint32_t steppings[] = {
+        REVISION_A0,
+        REVISION_B,
+        CommonConstants::invalidStepping};
+
+    for (auto stepping : steppings) {
+        hardwareInfo.platform.usRevId = hwInfoConfig.getHwRevIdFromStepping(stepping, hardwareInfo);
+
+        switch (stepping) {
+        case REVISION_A0:
+            EXPECT_TRUE(hwHelper.isWorkaroundRequired(REVISION_A0, REVISION_B, hardwareInfo));
+            [[fallthrough]];
+        default:
+            EXPECT_FALSE(hwHelper.isWorkaroundRequired(REVISION_B, REVISION_A0, hardwareInfo));
+            EXPECT_FALSE(hwHelper.isWorkaroundRequired(REVISION_A0, REVISION_D, hardwareInfo));
+        }
+    }
+}
+
+DG1TEST_F(HwHelperTestDg1, givenBufferAllocationTypeWhenSetExtraAllocationDataIsCalledThenIsLockableIsSet) {
+    auto &hwHelper = HwHelper::get(renderCoreFamily);
+    AllocationData allocData{};
+    allocData.flags.useSystemMemory = true;
+    AllocationProperties allocProperties(0, 1, GraphicsAllocation::AllocationType::BUFFER, {});
+    allocData.storageInfo.isLockable = false;
+    allocProperties.flags.shareable = false;
+    hwHelper.setExtraAllocationData(allocData, allocProperties, *defaultHwInfo);
+    EXPECT_TRUE(allocData.storageInfo.isLockable);
+}
+
+DG1TEST_F(HwHelperTestDg1, givenBufferAllocationTypeWhenSetExtraAllocationDataIsCalledWithShareableSetThenIsLockableIsFalse) {
+    auto &hwHelper = HwHelper::get(renderCoreFamily);
+    AllocationData allocData{};
+    allocData.flags.useSystemMemory = true;
+    AllocationProperties allocProperties(0, 1, GraphicsAllocation::AllocationType::BUFFER, {});
+    allocData.storageInfo.isLockable = false;
+    allocProperties.flags.shareable = true;
+    hwHelper.setExtraAllocationData(allocData, allocProperties, *defaultHwInfo);
+    EXPECT_FALSE(allocData.storageInfo.isLockable);
 }

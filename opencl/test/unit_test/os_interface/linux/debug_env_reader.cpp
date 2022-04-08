@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -7,9 +7,12 @@
 
 #include "shared/source/os_interface/debug_env_reader.h"
 
-#include "test.h"
+#include "shared/test/common/helpers/variable_backup.h"
+#include "shared/test/common/mocks/mock_io_functions.h"
+#include "shared/test/common/test_macros/test.h"
 
 #include <memory>
+#include <unordered_map>
 
 namespace NEO {
 
@@ -25,54 +28,87 @@ class DebugEnvReaderTests : public ::testing::Test {
     SettingsReader *evr = nullptr;
 };
 
-TEST_F(DebugEnvReaderTests, IfVariableIsSetReturnSetValue) {
+TEST_F(DebugEnvReaderTests, GivenSetVariableThenSetValueIsReturned) {
     int32_t ret;
     std::string retString;
     std::string defaultString = "Default Value";
     std::string setString = "Expected Value";
-
+    const char *testingVariableName = "TestingVariable";
     const char *testingVariableValue = "1234";
-    setenv("TestingVariable", testingVariableValue, 0);
-    ret = evr->getSetting("TestingVariable", 1);
-    EXPECT_EQ(1234, ret);
 
-    setenv("TestingVariable", setString.c_str(), 1);
-    retString = evr->getSetting("TestingVariable", defaultString);
-    EXPECT_EQ(0, retString.compare(setString));
+    {
+        VariableBackup<uint32_t> mockGetenvCalledBackup(&IoFunctions::mockGetenvCalled, 0);
+        std::unordered_map<std::string, std::string> mockableEnvs = {{testingVariableName, testingVariableValue}};
+        VariableBackup<std::unordered_map<std::string, std::string> *> mockableEnvValuesBackup(&IoFunctions::mockableEnvValues, &mockableEnvs);
 
-    unsetenv("TestingVariable");
-    ret = evr->getSetting("TestingVariable", 1);
-    EXPECT_EQ(1, ret);
+        ret = evr->getSetting(testingVariableName, 1);
+        EXPECT_EQ(1u, IoFunctions::mockGetenvCalled);
+        EXPECT_EQ(1234, ret);
+    }
+    {
+        VariableBackup<uint32_t> mockGetenvCalledBackup(&IoFunctions::mockGetenvCalled, 0);
+        std::unordered_map<std::string, std::string> mockableEnvs = {{testingVariableName, setString.c_str()}};
+        VariableBackup<std::unordered_map<std::string, std::string> *> mockableEnvValuesBackup(&IoFunctions::mockableEnvValues, &mockableEnvs);
+
+        retString = evr->getSetting("TestingVariable", defaultString);
+        EXPECT_EQ(1u, IoFunctions::mockGetenvCalled);
+        EXPECT_EQ(0, retString.compare(setString));
+    }
+    {
+        VariableBackup<uint32_t> mockGetenvCalledBackup(&IoFunctions::mockGetenvCalled, 0);
+        std::unordered_map<std::string, std::string> mockableEnvs = {};
+        VariableBackup<std::unordered_map<std::string, std::string> *> mockableEnvValuesBackup(&IoFunctions::mockableEnvValues, &mockableEnvs);
+
+        ret = evr->getSetting("TestingVariable", 1);
+        EXPECT_EQ(1u, IoFunctions::mockGetenvCalled);
+        EXPECT_EQ(1, ret);
+    }
 }
 
-TEST_F(DebugEnvReaderTests, IfVariableIsNotSetReturnDefaultValue) {
+TEST_F(DebugEnvReaderTests, GivenUnsetVariableThenDefaultValueIsReturned) {
     int32_t ret;
     std::string retString;
     std::string defaultString = "Default Value";
 
-    unsetenv("TestingVariable");
+    VariableBackup<uint32_t> mockGetenvCalledBackup(&IoFunctions::mockGetenvCalled, 0);
+    std::unordered_map<std::string, std::string> mockableEnvs = {};
+    VariableBackup<std::unordered_map<std::string, std::string> *> mockableEnvValuesBackup(&IoFunctions::mockableEnvValues, &mockableEnvs);
+
     ret = evr->getSetting("TestingVariable", 1);
+    EXPECT_EQ(1u, IoFunctions::mockGetenvCalled);
     EXPECT_EQ(1, ret);
 
     retString = evr->getSetting("TestingVariable", defaultString);
+    EXPECT_EQ(2u, IoFunctions::mockGetenvCalled);
     EXPECT_EQ(0, retString.compare(defaultString));
 }
 
-TEST_F(DebugEnvReaderTests, CheckBoolEnvVariable) {
+TEST_F(DebugEnvReaderTests, GivenBoolEnvVariableWhenGettingThenCorrectValueIsReturned) {
     bool ret;
     bool defaultValue = true;
     bool expectedValue = false;
 
-    setenv("TestingVariable", "0", 0);
-    ret = evr->getSetting("TestingVariable", defaultValue);
-    EXPECT_EQ(expectedValue, ret);
+    {
+        VariableBackup<uint32_t> mockGetenvCalledBackup(&IoFunctions::mockGetenvCalled, 0);
+        std::unordered_map<std::string, std::string> mockableEnvs = {{"TestingVariable", "0"}};
+        VariableBackup<std::unordered_map<std::string, std::string> *> mockableEnvValuesBackup(&IoFunctions::mockableEnvValues, &mockableEnvs);
 
-    unsetenv("TestingVariable");
-    ret = evr->getSetting("TestingVariable", defaultValue);
-    EXPECT_EQ(defaultValue, ret);
+        ret = evr->getSetting("TestingVariable", defaultValue);
+        EXPECT_EQ(1u, IoFunctions::mockGetenvCalled);
+        EXPECT_EQ(expectedValue, ret);
+    }
+    {
+        VariableBackup<uint32_t> mockGetenvCalledBackup(&IoFunctions::mockGetenvCalled, 0);
+        std::unordered_map<std::string, std::string> mockableEnvs = {};
+        VariableBackup<std::unordered_map<std::string, std::string> *> mockableEnvValuesBackup(&IoFunctions::mockableEnvValues, &mockableEnvs);
+
+        ret = evr->getSetting("TestingVariable", defaultValue);
+        EXPECT_EQ(1u, IoFunctions::mockGetenvCalled);
+        EXPECT_EQ(defaultValue, ret);
+    }
 }
 
-TEST_F(DebugEnvReaderTests, appSpecificLacationReturnClCacheLocation) {
+TEST_F(DebugEnvReaderTests, WhenSettingAppSpecificLocationThenLocationIsReturned) {
     std::string appSpecific;
     appSpecific = "cl_cache_dir";
     EXPECT_EQ(appSpecific, evr->appSpecificLocation(appSpecific));

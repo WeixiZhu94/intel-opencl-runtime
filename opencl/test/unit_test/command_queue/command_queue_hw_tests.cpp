@@ -1,29 +1,31 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2022 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
  */
 
-#include "shared/test/unit_test/helpers/debug_manager_state_restore.h"
+#include "shared/test/common/cmd_parse/hw_parse.h"
+#include "shared/test/common/helpers/debug_manager_state_restore.h"
+#include "shared/test/common/helpers/unit_test_helper.h"
+#include "shared/test/common/libult/ult_command_stream_receiver.h"
+#include "shared/test/common/mocks/mock_allocation_properties.h"
+#include "shared/test/common/mocks/mock_builtins.h"
+#include "shared/test/common/mocks/mock_csr.h"
+#include "shared/test/common/mocks/mock_os_library.h"
+#include "shared/test/common/mocks/mock_source_level_debugger.h"
+#include "shared/test/common/test_macros/matchers.h"
 #include "shared/test/unit_test/utilities/base_object_utils.h"
 
 #include "opencl/source/built_ins/builtins_dispatch_builder.h"
 #include "opencl/source/helpers/dispatch_info_builder.h"
 #include "opencl/test/unit_test/command_queue/command_queue_fixture.h"
 #include "opencl/test/unit_test/fixtures/buffer_fixture.h"
-#include "opencl/test/unit_test/fixtures/cl_device_fixture.h"
-#include "opencl/test/unit_test/fixtures/context_fixture.h"
 #include "opencl/test/unit_test/fixtures/image_fixture.h"
-#include "opencl/test/unit_test/helpers/unit_test_helper.h"
-#include "opencl/test/unit_test/mocks/mock_allocation_properties.h"
 #include "opencl/test/unit_test/mocks/mock_buffer.h"
-#include "opencl/test/unit_test/mocks/mock_builtins.h"
 #include "opencl/test/unit_test/mocks/mock_command_queue.h"
-#include "opencl/test/unit_test/mocks/mock_csr.h"
 #include "opencl/test/unit_test/mocks/mock_event.h"
 #include "opencl/test/unit_test/mocks/mock_kernel.h"
-#include "test.h"
 
 using namespace NEO;
 
@@ -78,6 +80,115 @@ struct OOQueueHwTest : public ClDeviceFixture,
     }
 };
 
+HWTEST_F(CommandQueueHwTest, WhenConstructingTwoCommandQueuesThenOnlyOneDebugSurfaceIsAllocated) {
+    ExecutionEnvironment *executionEnvironment = platform()->peekExecutionEnvironment();
+    executionEnvironment->rootDeviceEnvironments[0]->debugger.reset(new MockActiveSourceLevelDebugger(new MockOsLibrary));
+    auto device = std::make_unique<MockClDevice>(MockDevice::create<MockDeviceWithDebuggerActive>(executionEnvironment, 0u));
+    auto sipType = SipKernel::getSipKernelType(device->getDevice());
+    SipKernel::initSipKernel(sipType, device->getDevice());
+
+    MockCommandQueueHw<FamilyType> mockCmdQueueHw1(context, device.get(), nullptr);
+
+    auto dbgSurface = device->getGpgpuCommandStreamReceiver().getDebugSurfaceAllocation();
+    EXPECT_NE(dbgSurface, nullptr);
+
+    MockCommandQueueHw<FamilyType> mockCmdQueueHw2(context, device.get(), nullptr);
+    EXPECT_EQ(dbgSurface, device->getGpgpuCommandStreamReceiver().getDebugSurfaceAllocation());
+}
+
+HWTEST_F(CommandQueueHwTest, givenNoTimestampPacketsWhenWaitForTimestampsThenNoWaitAndTagIsNotUpdated) {
+    DebugManagerStateRestore restorer;
+    DebugManager.flags.EnableTimestampPacket.set(0);
+    DebugManager.flags.EnableTimestampWait.set(4);
+    ExecutionEnvironment *executionEnvironment = platform()->peekExecutionEnvironment();
+    auto device = std::make_unique<MockClDevice>(MockDevice::create<MockDeviceWithDebuggerActive>(executionEnvironment, 0u));
+    device->getUltCommandStreamReceiver<FamilyType>().timestampPacketWriteEnabled = false;
+    MockCommandQueueHw<FamilyType> cmdQ(context, device.get(), nullptr);
+    auto taskCount = device->getUltCommandStreamReceiver<FamilyType>().peekLatestFlushedTaskCount();
+
+    cmdQ.waitForTimestamps(101u);
+
+    EXPECT_EQ(device->getUltCommandStreamReceiver<FamilyType>().peekLatestFlushedTaskCount(), taskCount);
+}
+
+HWTEST_F(CommandQueueHwTest, WhenDebugSurfaceIsAllocatedThenBufferIsZeroed) {
+    ExecutionEnvironment *executionEnvironment = platform()->peekExecutionEnvironment();
+    executionEnvironment->rootDeviceEnvironments[0]->debugger.reset(new MockActiveSourceLevelDebugger(new MockOsLibrary));
+    auto device = std::make_unique<MockClDevice>(MockDevice::create<MockDeviceWithDebuggerActive>(executionEnvironment, 0u));
+    auto sipType = SipKernel::getSipKernelType(device->getDevice());
+    SipKernel::initSipKernel(sipType, device->getDevice());
+
+    MockCommandQueueHw<FamilyType> mockCmdQueueHw1(context, device.get(), nullptr);
+
+    auto dbgSurface = device->getGpgpuCommandStreamReceiver().getDebugSurfaceAllocation();
+    EXPECT_NE(dbgSurface, nullptr);
+    auto mem = dbgSurface->getUnderlyingBuffer();
+    ASSERT_NE(nullptr, mem);
+
+    auto &stateSaveAreaHeader = SipKernel::getSipKernel(device->getDevice()).getStateSaveAreaHeader();
+    mem = ptrOffset(mem, stateSaveAreaHeader.size());
+    auto size = dbgSurface->getUnderlyingBufferSize() - stateSaveAreaHeader.size();
+    EXPECT_THAT(mem, MemoryZeroed(size));
+}
+
+HWTEST_F(CommandQueueHwTest, WhenConstructingCommandQueueDebugOnButIgcDoesNotReturnSSAHDoNotCopyIt) {
+    ExecutionEnvironment *executionEnvironment = platform()->peekExecutionEnvironment();
+    executionEnvironment->rootDeviceEnvironments[0]->debugger.reset(new MockActiveSourceLevelDebugger(new MockOsLibrary));
+
+    MockGraphicsAllocation sipAlloc1;
+    auto mockSip1 = std::make_unique<MockSipKernel>(SipKernelType::DbgCsrLocal, &sipAlloc1);
+    mockSip1->mockStateSaveAreaHeader.clear();
+
+    MockGraphicsAllocation sipAlloc2;
+    auto mockSip2 = std::make_unique<MockSipKernel>(SipKernelType::DbgCsr, &sipAlloc2);
+    mockSip2->mockStateSaveAreaHeader.clear();
+
+    auto mockBuiltIns = new MockBuiltins();
+    mockBuiltIns->overrideSipKernel(std::move(mockSip1));
+    mockBuiltIns->overrideSipKernel(std::move(mockSip2));
+
+    executionEnvironment->rootDeviceEnvironments[0]->builtins.reset(mockBuiltIns);
+
+    auto device = std::make_unique<MockClDevice>(MockDevice::create<MockDeviceWithDebuggerActive>(executionEnvironment, 0u));
+
+    MockCommandQueueHw<FamilyType> mockCmdQueueHw1(context, device.get(), nullptr);
+
+    auto dbgSurface = device->getGpgpuCommandStreamReceiver().getDebugSurfaceAllocation();
+    EXPECT_NE(dbgSurface, nullptr);
+
+    auto &stateSaveAreaHeader = SipKernel::getSipKernel(device->getDevice()).getStateSaveAreaHeader();
+    EXPECT_EQ(static_cast<size_t>(0), stateSaveAreaHeader.size());
+}
+
+HWTEST_F(CommandQueueHwTest, givenMultiDispatchInfoWhenAskingForAuxTranslationThenCheckMemObjectsCountAndDebugFlag) {
+    DebugManagerStateRestore restore;
+    MockBuffer buffer;
+    KernelObjsForAuxTranslation kernelObjects;
+    MultiDispatchInfo multiDispatchInfo;
+    HardwareInfo *hwInfo = pClDevice->getExecutionEnvironment()->rootDeviceEnvironments[0]->getMutableHardwareInfo();
+
+    DebugManager.flags.ForceAuxTranslationMode.set(static_cast<int32_t>(AuxTranslationMode::Blit));
+
+    MockCommandQueueHw<FamilyType> mockCmdQueueHw(context, pClDevice, nullptr);
+
+    hwInfo->capabilityTable.blitterOperationsSupported = true;
+
+    EXPECT_FALSE(mockCmdQueueHw.isBlitAuxTranslationRequired(multiDispatchInfo));
+
+    multiDispatchInfo.setKernelObjsForAuxTranslation(kernelObjects);
+    EXPECT_FALSE(mockCmdQueueHw.isBlitAuxTranslationRequired(multiDispatchInfo));
+
+    kernelObjects.insert({KernelObjForAuxTranslation::Type::MEM_OBJ, &buffer});
+    EXPECT_TRUE(mockCmdQueueHw.isBlitAuxTranslationRequired(multiDispatchInfo));
+
+    hwInfo->capabilityTable.blitterOperationsSupported = false;
+    EXPECT_FALSE(mockCmdQueueHw.isBlitAuxTranslationRequired(multiDispatchInfo));
+
+    hwInfo->capabilityTable.blitterOperationsSupported = true;
+    DebugManager.flags.ForceAuxTranslationMode.set(static_cast<int32_t>(AuxTranslationMode::Builtin));
+    EXPECT_FALSE(mockCmdQueueHw.isBlitAuxTranslationRequired(multiDispatchInfo));
+}
+
 HWTEST_F(CommandQueueHwTest, WhenEnqueuingBlockedMapUnmapOperationThenVirtualEventIsCreated) {
 
     CommandQueueHw<FamilyType> *pHwQ = reinterpret_cast<CommandQueueHw<FamilyType> *>(pCmdQ);
@@ -98,6 +209,52 @@ HWTEST_F(CommandQueueHwTest, WhenEnqueuingBlockedMapUnmapOperationThenVirtualEve
     ASSERT_NE(nullptr, pHwQ->virtualEvent);
     pHwQ->virtualEvent->decRefInternal();
     pHwQ->virtualEvent = nullptr;
+}
+
+class MockCommandStreamReceiverWithFailingFlushBatchedSubmission : public MockCommandStreamReceiver {
+  public:
+    using MockCommandStreamReceiver::MockCommandStreamReceiver;
+    bool flushBatchedSubmissions() override {
+        return false;
+    }
+};
+
+template <typename GfxFamily>
+struct MockCommandQueueHwWithOverwrittenCsr : public CommandQueueHw<GfxFamily> {
+    using CommandQueueHw<GfxFamily>::CommandQueueHw;
+    MockCommandStreamReceiverWithFailingFlushBatchedSubmission *csr;
+    CommandStreamReceiver &getGpgpuCommandStreamReceiver() const override { return *csr; }
+};
+
+HWTEST_F(CommandQueueHwTest, GivenCommandQueueWhenProcessDispatchForMarkerCalledThenEventAllocationIsMadeResident) {
+
+    pDevice->getUltCommandStreamReceiver<FamilyType>().timestampPacketWriteEnabled = false;
+    MockCommandStreamReceiverWithFailingFlushBatchedSubmission csr(*pDevice->getExecutionEnvironment(), 0, pDevice->getDeviceBitfield());
+    auto myCmdQ = std::make_unique<MockCommandQueueHwWithOverwrittenCsr<FamilyType>>(pCmdQ->getContextPtr(), pClDevice, nullptr, false);
+    myCmdQ->csr = &csr;
+    csr.osContext = &pCmdQ->getGpgpuCommandStreamReceiver().getOsContext();
+    std::unique_ptr<Event> event(new Event(myCmdQ.get(), CL_COMMAND_COPY_BUFFER, 0, 0));
+    ASSERT_NE(nullptr, event);
+
+    GraphicsAllocation *allocation = event->getHwTimeStampNode()->getBaseGraphicsAllocation()->getDefaultGraphicsAllocation();
+    ASSERT_NE(nullptr, allocation);
+    cl_event a = event.get();
+    EventsRequest eventsRequest(0, nullptr, &a);
+    uint32_t streamBuffer[100] = {};
+    NEO::LinearStream linearStream(streamBuffer, sizeof(streamBuffer));
+    CsrDependencies deps = {};
+    myCmdQ->processDispatchForMarker(*myCmdQ.get(), &linearStream, eventsRequest, deps);
+    EXPECT_GT(csr.makeResidentCalledTimes, 0u);
+}
+
+HWTEST_F(CommandQueueHwTest, GivenCommandQueueWhenItIsCreatedThenInitDirectSubmissionIsCalledOnAllBcsEngines) {
+    MockCommandQueueHw<FamilyType> queue(pContext, pClDevice, nullptr);
+    for (auto engine : queue.bcsEngines) {
+        if (engine != nullptr) {
+            auto csr = static_cast<UltCommandStreamReceiver<FamilyType> *>(engine->commandStreamReceiver);
+            EXPECT_EQ(1u, csr->initDirectSubmissionCalled);
+        }
+    }
 }
 
 HWTEST_F(CommandQueueHwTest, givenCommandQueueWhenAskingForCacheFlushOnBcsThenReturnTrue) {
@@ -285,7 +442,7 @@ HWTEST_F(CommandQueueHwTest, GivenEventWhenEnqueuingBlockedMapUnmapOperationThen
     buffer->decRefInternal();
 }
 
-HWTEST_F(CommandQueueHwTest, GivenNonEmptyQueueOnBlockingMapBufferWillWaitForPrecedingCommandsToComplete) {
+HWTEST_F(CommandQueueHwTest, GivenNonEmptyQueueOnBlockingWhenMappingBufferThenWillWaitForPrecedingCommandsToComplete) {
     struct MockCmdQ : CommandQueueHw<FamilyType> {
         MockCmdQ(Context *context, ClDevice *device)
             : CommandQueueHw<FamilyType>(context, device, 0, false) {
@@ -324,7 +481,7 @@ HWTEST_F(CommandQueueHwTest, GivenNonEmptyQueueOnBlockingMapBufferWillWaitForPre
     clReleaseEvent(gatingEvent);
 }
 
-HWTEST_F(CommandQueueHwTest, GivenEventsWaitlistOnBlockingMapBufferWillWaitForEvents) {
+HWTEST_F(CommandQueueHwTest, GivenEventsWaitlistOnBlockingWhenMappingBufferThenWillWaitForEvents) {
     struct MockEvent : UserEvent {
         MockEvent(Context *ctx, uint32_t updateCountBeforeCompleted)
             : UserEvent(ctx),
@@ -359,7 +516,7 @@ HWTEST_F(CommandQueueHwTest, GivenEventsWaitlistOnBlockingMapBufferWillWaitForEv
 
 HWTEST_F(CommandQueueHwTest, GivenNotCompleteUserEventPassedToEnqueueWhenEventIsUnblockedThenAllSurfacesForBlockedCommandsAreMadeResident) {
     int32_t executionStamp = 0;
-    auto mockCSR = new MockCsr<FamilyType>(executionStamp, *pDevice->executionEnvironment, pDevice->getRootDeviceIndex());
+    auto mockCSR = new MockCsr<FamilyType>(executionStamp, *pDevice->executionEnvironment, pDevice->getRootDeviceIndex(), pDevice->getDeviceBitfield());
     pDevice->resetCommandStreamReceiver(mockCSR);
 
     auto userEvent = make_releaseable<UserEvent>(context);
@@ -395,6 +552,16 @@ HWTEST_F(CommandQueueHwTest, GivenNotCompleteUserEventPassedToEnqueueWhenEventIs
     mockCSR->getMemoryManager()->freeGraphicsMemory(constantSurface);
 }
 
+HWTEST_F(CommandQueueHwTest, whenReleaseQueueCalledThenFlushIsCalled) {
+    cl_int retVal = 0;
+    auto mockCmdQ = new MockCommandQueueHw<FamilyType>(context, pClDevice, 0);
+    mockCmdQ->incRefInternal();
+    releaseQueue(mockCmdQ, retVal);
+    EXPECT_TRUE(mockCmdQ->flushCalled);
+    //this call will release the queue
+    mockCmdQ->decRefInternal();
+}
+
 typedef CommandQueueHwTest BlockedCommandQueueTest;
 
 HWTEST_F(BlockedCommandQueueTest, givenCommandQueueWhenBlockedCommandIsBeingSubmittedThenQueueHeapsAreNotUsed) {
@@ -410,9 +577,9 @@ HWTEST_F(BlockedCommandQueueTest, givenCommandQueueWhenBlockedCommandIsBeingSubm
     pCmdQ->enqueueKernel(mockKernel, 1, &offset, &size, &size, 1, &blockedEvent, nullptr);
     userEvent.setStatus(CL_COMPLETE);
 
-    auto &ioh = pCmdQ->getIndirectHeap(IndirectHeap::INDIRECT_OBJECT, 4096u);
-    auto &dsh = pCmdQ->getIndirectHeap(IndirectHeap::DYNAMIC_STATE, 4096u);
-    auto &ssh = pCmdQ->getIndirectHeap(IndirectHeap::SURFACE_STATE, 4096u);
+    auto &ioh = pCmdQ->getIndirectHeap(IndirectHeap::Type::INDIRECT_OBJECT, 4096u);
+    auto &dsh = pCmdQ->getIndirectHeap(IndirectHeap::Type::DYNAMIC_STATE, 4096u);
+    auto &ssh = pCmdQ->getIndirectHeap(IndirectHeap::Type::SURFACE_STATE, 4096u);
 
     uint32_t defaultSshUse = UnitTestHelper<FamilyType>::getDefaultSshUsage();
 
@@ -433,9 +600,9 @@ HWTEST_F(BlockedCommandQueueTest, givenCommandQueueWithUsedHeapsWhenBlockedComma
 
     cl_event blockedEvent = &userEvent;
 
-    auto &ioh = pCmdQ->getIndirectHeap(IndirectHeap::INDIRECT_OBJECT, 4096u);
-    auto &dsh = pCmdQ->getIndirectHeap(IndirectHeap::DYNAMIC_STATE, 4096u);
-    auto &ssh = pCmdQ->getIndirectHeap(IndirectHeap::SURFACE_STATE, 4096u);
+    auto &ioh = pCmdQ->getIndirectHeap(IndirectHeap::Type::INDIRECT_OBJECT, 4096u);
+    auto &dsh = pCmdQ->getIndirectHeap(IndirectHeap::Type::DYNAMIC_STATE, 4096u);
+    auto &ssh = pCmdQ->getIndirectHeap(IndirectHeap::Type::SURFACE_STATE, 4096u);
 
     auto spaceToUse = 4u;
 
@@ -465,9 +632,9 @@ HWTEST_F(BlockedCommandQueueTest, givenCommandQueueWhichHasSomeUnusedHeapsWhenBl
 
     cl_event blockedEvent = &userEvent;
 
-    auto &ioh = pCmdQ->getIndirectHeap(IndirectHeap::INDIRECT_OBJECT, 4096u);
-    auto &dsh = pCmdQ->getIndirectHeap(IndirectHeap::DYNAMIC_STATE, 4096u);
-    auto &ssh = pCmdQ->getIndirectHeap(IndirectHeap::SURFACE_STATE, 4096u);
+    auto &ioh = pCmdQ->getIndirectHeap(IndirectHeap::Type::INDIRECT_OBJECT, 4096u);
+    auto &dsh = pCmdQ->getIndirectHeap(IndirectHeap::Type::DYNAMIC_STATE, 4096u);
+    auto &ssh = pCmdQ->getIndirectHeap(IndirectHeap::Type::SURFACE_STATE, 4096u);
 
     auto iohBase = ioh.getCpuBase();
     auto dshBase = dsh.getCpuBase();
@@ -532,7 +699,7 @@ HWTEST_F(CommandQueueHwRefCountTest, givenBlockedCmdQWhenNewBlockedEnqueueReplac
     EXPECT_EQ(2, mockCmdQ->getRefInternalCount());
 
     //this call will release the queue
-    releaseQueue<CommandQueue>(mockCmdQ, retVal);
+    releaseQueue(mockCmdQ, retVal);
 }
 
 HWTEST_F(CommandQueueHwRefCountTest, givenBlockedCmdQWithOutputEventAsVirtualEventWhenNewBlockedEnqueueReplacesVirtualEventCreatedFromOutputEventThenPreviousVirtualEventDoesntDecrementRefCount) {
@@ -577,7 +744,7 @@ HWTEST_F(CommandQueueHwRefCountTest, givenBlockedCmdQWithOutputEventAsVirtualEve
     EXPECT_EQ(2, mockCmdQ->getRefInternalCount());
     mockCmdQ->isQueueBlocked();
 
-    releaseQueue<CommandQueue>(mockCmdQ, retVal);
+    releaseQueue(mockCmdQ, retVal);
 }
 
 HWTEST_F(CommandQueueHwRefCountTest, givenSeriesOfBlockedEnqueuesWhenEveryEventIsDeletedAndCmdQIsReleasedThenCmdQIsDeleted) {
@@ -627,7 +794,7 @@ HWTEST_F(CommandQueueHwRefCountTest, givenSeriesOfBlockedEnqueuesWhenEveryEventI
 
     EXPECT_EQ(1, mockCmdQ->getRefInternalCount());
 
-    releaseQueue<CommandQueue>(mockCmdQ, retVal);
+    releaseQueue(mockCmdQ, retVal);
 }
 
 HWTEST_F(CommandQueueHwRefCountTest, givenSeriesOfBlockedEnqueuesWhenCmdQIsReleasedBeforeOutputEventThenOutputEventDeletesCmdQ) {
@@ -667,7 +834,7 @@ HWTEST_F(CommandQueueHwRefCountTest, givenSeriesOfBlockedEnqueuesWhenCmdQIsRelea
     // releasing UserEvent doesn't change the queue refCount
     EXPECT_EQ(3, mockCmdQ->getRefInternalCount());
 
-    releaseQueue<CommandQueue>(mockCmdQ, retVal);
+    releaseQueue(mockCmdQ, retVal);
 
     // releasing cmdQ decrements refCount
     EXPECT_EQ(1, mockCmdQ->getRefInternalCount());
@@ -702,18 +869,53 @@ HWTEST_F(CommandQueueHwTest, GivenEventThatIsNotCompletedWhenFinishIsCalledAndIt
     ev->decRefInternal();
 }
 
+HWTEST_F(CommandQueueHwTest, GivenMultiTileQueueWhenEventNotCompletedAndFinishIsCalledThenItGetsCompletedOnAllTilesAndItStatusIsUpdatedAfterFinishCall) {
+    DebugManagerStateRestore dbgRestore;
+    DebugManager.flags.EnableAsyncEventsHandler.set(false);
+
+    auto &csr = this->pCmdQ->getGpgpuCommandStreamReceiver();
+    csr.setActivePartitions(2u);
+    auto ultCsr = reinterpret_cast<UltCommandStreamReceiver<FamilyType> *>(&csr);
+    ultCsr->postSyncWriteOffset = 32;
+
+    auto tagAddress = csr.getTagAddress();
+    *ptrOffset(tagAddress, 32) = *tagAddress;
+
+    struct ClbFuncTempStruct {
+        static void CL_CALLBACK ClbFuncT(cl_event e, cl_int execStatus, void *valueForUpdate) {
+            *static_cast<cl_int *>(valueForUpdate) = 1;
+        }
+    };
+    auto value = 0u;
+
+    auto ev = new Event(this->pCmdQ, CL_COMMAND_COPY_BUFFER, 3, CompletionStamp::notReady + 1);
+    clSetEventCallback(ev, CL_COMPLETE, ClbFuncTempStruct::ClbFuncT, &value);
+    EXPECT_GT(3u, csr.peekTaskCount());
+
+    *tagAddress = CompletionStamp::notReady + 1;
+    tagAddress = ptrOffset(tagAddress, 32);
+    *tagAddress = CompletionStamp::notReady + 1;
+
+    cl_int ret = clFinish(this->pCmdQ);
+    ASSERT_EQ(CL_SUCCESS, ret);
+
+    ev->updateExecutionStatus();
+    EXPECT_EQ(1u, value);
+    ev->decRefInternal();
+}
+
 void CloneMdi(MultiDispatchInfo &dst, const MultiDispatchInfo &src) {
     for (auto &srcDi : src) {
         dst.push(srcDi);
     }
+    dst.setBuiltinOpParams(src.peekBuiltinOpParams());
 }
 
 struct MockBuilder : BuiltinDispatchInfoBuilder {
-    MockBuilder(NEO::BuiltIns &builtins) : BuiltinDispatchInfoBuilder(builtins) {
-    }
-    bool buildDispatchInfos(MultiDispatchInfo &d, const BuiltinOpParams &conf) const override {
+    using BuiltinDispatchInfoBuilder::BuiltinDispatchInfoBuilder;
+    bool buildDispatchInfos(MultiDispatchInfo &d) const override {
         wasBuildDispatchInfosWithBuiltinOpParamsCalled = true;
-        paramsReceived.multiDispatchInfo.setBuiltinOpParams(conf);
+        paramsReceived.multiDispatchInfo.setBuiltinOpParams(d.peekBuiltinOpParams());
         return true;
     }
     bool buildDispatchInfos(MultiDispatchInfo &d, Kernel *kernel,
@@ -724,10 +926,10 @@ struct MockBuilder : BuiltinDispatchInfoBuilder {
         paramsReceived.offset = offset;
         wasBuildDispatchInfosWithKernelParamsCalled = true;
 
-        DispatchInfoBuilder<NEO::SplitDispatch::Dim::d3D, NEO::SplitDispatch::SplitMode::NoSplit> dib;
-        dib.setKernel(paramsToUse.kernel);
-        dib.setDispatchGeometry(dim, paramsToUse.gws, paramsToUse.elws, paramsToUse.offset);
-        dib.bake(d);
+        DispatchInfoBuilder<NEO::SplitDispatch::Dim::d3D, NEO::SplitDispatch::SplitMode::NoSplit> dispatchInfoBuilder(clDevice);
+        dispatchInfoBuilder.setKernel(paramsToUse.kernel);
+        dispatchInfoBuilder.setDispatchGeometry(dim, paramsToUse.gws, paramsToUse.elws, paramsToUse.offset);
+        dispatchInfoBuilder.bake(d);
 
         CloneMdi(paramsReceived.multiDispatchInfo, d);
         return true;
@@ -753,15 +955,14 @@ struct BuiltinParamsCommandQueueHwTests : public CommandQueueHwTest {
         auto builtIns = new MockBuiltins();
         pCmdQ->getDevice().getExecutionEnvironment()->rootDeviceEnvironments[pCmdQ->getDevice().getRootDeviceIndex()]->builtins.reset(builtIns);
 
-        auto swapBuilder = builtIns->setBuiltinDispatchInfoBuilder(
+        auto swapBuilder = pClExecutionEnvironment->setBuiltinDispatchInfoBuilder(
+            rootDeviceIndex,
             operation,
-            *pContext,
-            *pDevice,
-            std::unique_ptr<NEO::BuiltinDispatchInfoBuilder>(new MockBuilder(*builtIns)));
+            std::unique_ptr<NEO::BuiltinDispatchInfoBuilder>(new MockBuilder(*builtIns, pCmdQ->getClDevice())));
 
         mockBuilder = static_cast<MockBuilder *>(&BuiltInDispatchBuilderOp::getBuiltinDispatchInfoBuilder(
             operation,
-            *pDevice));
+            *pClDevice));
     }
 
     MockBuilder *mockBuilder;
@@ -918,7 +1119,7 @@ HWTEST_F(BuiltinParamsCommandQueueHwTests, givenEnqueueReadWriteBufferRectCallWh
     EXPECT_EQ(offset, builtinParams.dstOffset);
     EXPECT_EQ(ptrOffset, builtinParams.srcOffset.x);
 }
-HWTEST_F(CommandQueueHwTest, givenCommandQueueThatIsBlockedAndUsesCpuCopyWhenEventIsReturnedItIsNotReady) {
+HWTEST_F(CommandQueueHwTest, givenCommandQueueThatIsBlockedAndUsesCpuCopyWhenEventIsReturnedThenItIsNotReady) {
     CommandQueueHw<FamilyType> *cmdQHw = static_cast<CommandQueueHw<FamilyType> *>(this->pCmdQ);
     MockBuffer buffer;
     cl_event returnEvent = nullptr;
@@ -957,8 +1158,8 @@ HWTEST_F(CommandQueueHwTest, givenEventWithRecordedCommandWhenSubmitCommandIsCal
     EXPECT_EQ(CompletionStamp::notReady, neoEvent.peekTaskCount());
 
     std::thread t([&]() {
-        while (!go)
-            ;
+        while (!go) {
+        }
         neoEvent.updateTaskCount(77u, 0);
     });
 
@@ -972,7 +1173,7 @@ HWTEST_F(CommandQueueHwTest, GivenBuiltinKernelWhenBuiltinDispatchInfoBuilderIsP
     CommandQueueHw<FamilyType> *cmdQHw = static_cast<CommandQueueHw<FamilyType> *>(this->pCmdQ);
 
     MockKernelWithInternals mockKernelToUse(*pClDevice);
-    MockBuilder builder(*pDevice->getBuiltIns());
+    MockBuilder builder(*pDevice->getBuiltIns(), *pClDevice);
     builder.paramsToUse.gws.x = 11;
     builder.paramsToUse.elws.x = 13;
     builder.paramsToUse.offset.x = 17;
@@ -1055,7 +1256,7 @@ HWTEST_F(CommandQueueHwTest, givenBlockedInOrderCmdQueueAndAsynchronouslyComplet
     CommandQueueHw<FamilyType> *cmdQHw = static_cast<CommandQueueHw<FamilyType> *>(this->pCmdQ);
 
     int32_t executionStamp = 0;
-    auto mockCSR = new MockCsr<FamilyType>(executionStamp, *pDevice->executionEnvironment, pDevice->getRootDeviceIndex());
+    auto mockCSR = new MockCsr<FamilyType>(executionStamp, *pDevice->executionEnvironment, pDevice->getRootDeviceIndex(), pDevice->getDeviceBitfield());
 
     pDevice->resetCommandStreamReceiver(mockCSR);
 
@@ -1135,7 +1336,7 @@ HWTEST_F(OOQueueHwTest, givenBlockedOutOfOrderCmdQueueAndAsynchronouslyCompleted
     CommandQueueHw<FamilyType> *cmdQHw = static_cast<CommandQueueHw<FamilyType> *>(this->pCmdQ);
 
     int32_t executionStamp = 0;
-    auto mockCSR = new MockCsr<FamilyType>(executionStamp, *pDevice->executionEnvironment, pDevice->getRootDeviceIndex());
+    auto mockCSR = new MockCsr<FamilyType>(executionStamp, *pDevice->executionEnvironment, pDevice->getRootDeviceIndex(), pDevice->getDeviceBitfield());
     pDevice->resetCommandStreamReceiver(mockCSR);
 
     MockKernelWithInternals mockKernelWithInternals(*pClDevice);
@@ -1280,55 +1481,261 @@ HWTEST_F(CommandQueueHwTest, givenSizeWhenForceStatelessIsCalledThenCorrectValue
     EXPECT_FALSE(pCmdQHw->forceStateless(static_cast<size_t>(smallSize)));
 }
 
-class MockCommandStreamReceiverWithFailingFlushBatchedSubmission : public MockCommandStreamReceiver {
-  public:
-    using MockCommandStreamReceiver::MockCommandStreamReceiver;
-    bool flushBatchedSubmissions() override {
-        return false;
-    }
-};
-
-template <typename GfxFamily>
-struct MockCommandQueueHwWithOverwrittenCsr : public CommandQueueHw<GfxFamily> {
-    using CommandQueueHw<GfxFamily>::CommandQueueHw;
-    MockCommandStreamReceiverWithFailingFlushBatchedSubmission *csr;
-    CommandStreamReceiver &getGpgpuCommandStreamReceiver() const override { return *csr; }
-};
-
 HWTEST_F(CommandQueueHwTest, givenFlushWhenFlushBatchedSubmissionsFailsThenErrorIsRetured) {
-
-    MockCommandQueueHwWithOverwrittenCsr<FamilyType> cmdQueue(context, device, nullptr, false);
-    MockCommandStreamReceiverWithFailingFlushBatchedSubmission csr(*pDevice->executionEnvironment, 0);
+    MockCommandQueueHwWithOverwrittenCsr<FamilyType> cmdQueue(context, pClDevice, nullptr, false);
+    MockCommandStreamReceiverWithFailingFlushBatchedSubmission csr(*pDevice->executionEnvironment, 0, pDevice->getDeviceBitfield());
     cmdQueue.csr = &csr;
     cl_int errorCode = cmdQueue.flush();
     EXPECT_EQ(CL_OUT_OF_RESOURCES, errorCode);
 }
 
 HWTEST_F(CommandQueueHwTest, givenFinishWhenFlushBatchedSubmissionsFailsThenErrorIsRetured) {
-    MockCommandQueueHwWithOverwrittenCsr<FamilyType> cmdQueue(context, device, nullptr, false);
-    MockCommandStreamReceiverWithFailingFlushBatchedSubmission csr(*pDevice->executionEnvironment, 0);
+    MockCommandQueueHwWithOverwrittenCsr<FamilyType> cmdQueue(context, pClDevice, nullptr, false);
+    MockCommandStreamReceiverWithFailingFlushBatchedSubmission csr(*pDevice->executionEnvironment, 0, pDevice->getDeviceBitfield());
     cmdQueue.csr = &csr;
     cl_int errorCode = cmdQueue.finish();
     EXPECT_EQ(CL_OUT_OF_RESOURCES, errorCode);
 }
 
-HWTEST_F(CommandQueueHwTest, givenEmptyDispatchGlobalsArgsWhenEnqueueInitDispatchGlobalsCalledThenErrorIsReturned) {
-    EXPECT_EQ(CL_INVALID_VALUE, pCmdQ->enqueueInitDispatchGlobals(nullptr, 0, nullptr, nullptr));
+HWTEST_F(IoqCommandQueueHwBlitTest, givenGpgpuCsrWhenEnqueueingSubsequentBlitsThenGpgpuCommandStreamIsNotObtained) {
+    auto &gpgpuCsr = pDevice->getUltCommandStreamReceiver<FamilyType>();
+    auto srcBuffer = std::unique_ptr<Buffer>{BufferHelper<>::create(pContext)};
+    auto dstBuffer = std::unique_ptr<Buffer>{BufferHelper<>::create(pContext)};
+
+    cl_int retVal = pCmdQ->enqueueCopyBuffer(
+        srcBuffer.get(),
+        dstBuffer.get(),
+        0,
+        0,
+        1,
+        0,
+        nullptr,
+        nullptr);
+    ASSERT_EQ(CL_SUCCESS, retVal);
+    EXPECT_EQ(0, gpgpuCsr.ensureCommandBufferAllocationCalled);
+
+    retVal = pCmdQ->enqueueCopyBuffer(
+        srcBuffer.get(),
+        dstBuffer.get(),
+        0,
+        0,
+        1,
+        0,
+        nullptr,
+        nullptr);
+    ASSERT_EQ(CL_SUCCESS, retVal);
+    EXPECT_EQ(0, gpgpuCsr.ensureCommandBufferAllocationCalled);
 }
 
-HWTEST_F(CommandQueueHwTest, WhenForcePerDssBackedBufferProgrammingSetThenDispatchFlagsAreSetAccordingly) {
-    DebugManagerStateRestore restore;
-    DebugManager.flags.ForcePerDssBackedBufferProgramming = true;
+HWTEST_F(IoqCommandQueueHwBlitTest, givenGpgpuCsrWhenEnqueueingBlitAfterKernelThenGpgpuCommandStreamIsObtained) {
+    auto &gpgpuCsr = pDevice->getUltCommandStreamReceiver<FamilyType>();
+    auto srcBuffer = std::unique_ptr<Buffer>{BufferHelper<>::create(pContext)};
+    auto dstBuffer = std::unique_ptr<Buffer>{BufferHelper<>::create(pContext)};
 
     MockKernelWithInternals mockKernelWithInternals(*pClDevice);
-    auto mockKernel = mockKernelWithInternals.mockKernel;
-    auto &csr = pDevice->getUltCommandStreamReceiver<FamilyType>();
-
     size_t offset = 0;
-    size_t gws = 64;
-    size_t lws = 16;
+    size_t size = 1;
+    cl_int retVal = pCmdQ->enqueueKernel(mockKernelWithInternals.mockKernel, 1, &offset, &size, &size, 0, nullptr, nullptr);
+    ASSERT_EQ(CL_SUCCESS, retVal);
+    EXPECT_NE(0, gpgpuCsr.ensureCommandBufferAllocationCalled);
+    const auto ensureCommandBufferAllocationCalledAfterKernel = gpgpuCsr.ensureCommandBufferAllocationCalled;
 
-    cl_int status = pCmdQ->enqueueKernel(mockKernel, 1, &offset, &gws, &lws, 0, nullptr, nullptr);
-    EXPECT_EQ(CL_SUCCESS, status);
-    EXPECT_TRUE(csr.recordedDispatchFlags.usePerDssBackedBuffer);
+    retVal = pCmdQ->enqueueCopyBuffer(
+        srcBuffer.get(),
+        dstBuffer.get(),
+        0,
+        0,
+        1,
+        0,
+        nullptr,
+        nullptr);
+    ASSERT_EQ(CL_SUCCESS, retVal);
+    EXPECT_NE(ensureCommandBufferAllocationCalledAfterKernel, gpgpuCsr.ensureCommandBufferAllocationCalled);
+}
+
+HWTEST_F(OoqCommandQueueHwBlitTest, givenBlitAfterBarrierWhenEnqueueingCommandThenWaitForBarrierOnBlit) {
+    using MI_SEMAPHORE_WAIT = typename FamilyType::MI_SEMAPHORE_WAIT;
+    using PIPE_CONTROL = typename FamilyType::PIPE_CONTROL;
+
+    if (pCmdQ->getTimestampPacketContainer() == nullptr) {
+        GTEST_SKIP();
+    }
+    DebugManagerStateRestore restore{};
+    DebugManager.flags.DoCpuCopyOnReadBuffer.set(0);
+    DebugManager.flags.ForceCacheFlushForBcs.set(0);
+    DebugManager.flags.UpdateTaskCountFromWait.set(1);
+
+    MockKernelWithInternals mockKernelWithInternals(*pClDevice);
+    MockKernel *kernel = mockKernelWithInternals.mockKernel;
+    size_t offset = 0;
+    size_t gws = 1;
+    BufferDefaults::context = context;
+    auto buffer = clUniquePtr(BufferHelper<>::create());
+    char ptr[1] = {};
+
+    EXPECT_EQ(CL_SUCCESS, pCmdQ->enqueueKernel(kernel, 1, &offset, &gws, nullptr, 0, nullptr, nullptr));
+    EXPECT_EQ(CL_SUCCESS, pCmdQ->enqueueKernel(kernel, 1, &offset, &gws, nullptr, 0, nullptr, nullptr));
+    auto ccsStart = pCmdQ->getGpgpuCommandStreamReceiver().getCS().getUsed();
+    EXPECT_EQ(CL_SUCCESS, pCmdQ->enqueueBarrierWithWaitList(0, nullptr, nullptr));
+    EXPECT_EQ(CL_SUCCESS, pCmdQ->enqueueReadBuffer(buffer.get(), CL_FALSE, 0, 1u, ptr, nullptr, 0, nullptr, nullptr));
+
+    uint64_t barrierNodeAddress = 0u;
+    {
+        HardwareParse ccsHwParser;
+        ccsHwParser.parseCommands<FamilyType>(pCmdQ->getGpgpuCommandStreamReceiver().getCS(0), ccsStart);
+
+        const auto pipeControlItor = find<PIPE_CONTROL *>(ccsHwParser.cmdList.begin(), ccsHwParser.cmdList.end());
+        auto pipeControl = genCmdCast<PIPE_CONTROL *>(*pipeControlItor);
+        EXPECT_EQ(PIPE_CONTROL::POST_SYNC_OPERATION::POST_SYNC_OPERATION_WRITE_IMMEDIATE_DATA, pipeControl->getPostSyncOperation());
+        barrierNodeAddress = pipeControl->getAddress() | (static_cast<uint64_t>(pipeControl->getAddressHigh()) << 32);
+
+        // There shouldn't be any semaphores before the barrier
+        const auto semaphoreItor = find<MI_SEMAPHORE_WAIT *>(ccsHwParser.cmdList.begin(), pipeControlItor);
+        EXPECT_EQ(pipeControlItor, semaphoreItor);
+    }
+
+    {
+        HardwareParse bcsHwParser;
+        bcsHwParser.parseCommands<FamilyType>(pCmdQ->getBcsCommandStreamReceiver(aub_stream::ENGINE_BCS)->getCS(0), 0u);
+
+        const auto semaphoreItor = find<MI_SEMAPHORE_WAIT *>(bcsHwParser.cmdList.begin(), bcsHwParser.cmdList.end());
+        auto semaphore = genCmdCast<MI_SEMAPHORE_WAIT *>(*semaphoreItor);
+        EXPECT_EQ(barrierNodeAddress, semaphore->getSemaphoreGraphicsAddress());
+
+        const auto pipeControlItor = find<PIPE_CONTROL *>(semaphoreItor, bcsHwParser.cmdList.end());
+        EXPECT_EQ(bcsHwParser.cmdList.end(), pipeControlItor);
+    }
+
+    EXPECT_EQ(CL_SUCCESS, pCmdQ->finish());
+}
+
+HWTEST_F(OoqCommandQueueHwBlitTest, givenBlitBeforeBarrierWhenEnqueueingCommandThenWaitForBlitBeforeBarrier) {
+    using MI_SEMAPHORE_WAIT = typename FamilyType::MI_SEMAPHORE_WAIT;
+    using PIPE_CONTROL = typename FamilyType::PIPE_CONTROL;
+    using XY_COPY_BLT = typename FamilyType::XY_COPY_BLT;
+
+    if (pCmdQ->getTimestampPacketContainer() == nullptr) {
+        GTEST_SKIP();
+    }
+    DebugManagerStateRestore restore{};
+    DebugManager.flags.DoCpuCopyOnReadBuffer.set(0);
+    DebugManager.flags.ForceCacheFlushForBcs.set(0);
+    DebugManager.flags.UpdateTaskCountFromWait.set(1);
+
+    MockKernelWithInternals mockKernelWithInternals(*pClDevice);
+    MockKernel *kernel = mockKernelWithInternals.mockKernel;
+    size_t offset = 0;
+    size_t gws = 1;
+    BufferDefaults::context = context;
+    auto buffer = clUniquePtr(BufferHelper<>::create());
+    char ptr[1] = {};
+
+    EXPECT_EQ(CL_SUCCESS, pCmdQ->enqueueReadBuffer(buffer.get(), CL_FALSE, 0, 1u, ptr, nullptr, 0, nullptr, nullptr));
+    EXPECT_EQ(CL_SUCCESS, pCmdQ->enqueueReadBuffer(buffer.get(), CL_FALSE, 0, 1u, ptr, nullptr, 0, nullptr, nullptr));
+    uint64_t lastBlitNodeAddress = TimestampPacketHelper::getContextEndGpuAddress(*pCmdQ->getTimestampPacketContainer()->peekNodes()[0]);
+    EXPECT_EQ(CL_SUCCESS, pCmdQ->enqueueKernel(kernel, 1, &offset, &gws, nullptr, 0, nullptr, nullptr));
+    auto ccsStart = pCmdQ->getGpgpuCommandStreamReceiver().getCS().getUsed();
+    auto bcsStart = pCmdQ->getBcsCommandStreamReceiver(aub_stream::ENGINE_BCS)->getCS(0).getUsed();
+    EXPECT_EQ(CL_SUCCESS, pCmdQ->enqueueBarrierWithWaitList(0, nullptr, nullptr));
+    EXPECT_EQ(CL_SUCCESS, pCmdQ->enqueueKernel(kernel, 1, &offset, &gws, nullptr, 0, nullptr, nullptr));
+    EXPECT_EQ(CL_SUCCESS, pCmdQ->enqueueReadBuffer(buffer.get(), CL_FALSE, 0, 1u, ptr, nullptr, 0, nullptr, nullptr));
+    EXPECT_EQ(CL_SUCCESS, pCmdQ->enqueueReadBuffer(buffer.get(), CL_FALSE, 0, 1u, ptr, nullptr, 0, nullptr, nullptr));
+
+    uint64_t barrierNodeAddress = 0u;
+    {
+        HardwareParse ccsHwParser;
+        ccsHwParser.parseCommands<FamilyType>(pCmdQ->getGpgpuCommandStreamReceiver().getCS(0), ccsStart);
+
+        const auto semaphoreItor = find<MI_SEMAPHORE_WAIT *>(ccsHwParser.cmdList.begin(), ccsHwParser.cmdList.end());
+        const auto semaphore = genCmdCast<MI_SEMAPHORE_WAIT *>(*semaphoreItor);
+        EXPECT_EQ(lastBlitNodeAddress, semaphore->getSemaphoreGraphicsAddress());
+
+        const auto pipeControlItor = find<PIPE_CONTROL *>(semaphoreItor, ccsHwParser.cmdList.end());
+        const auto pipeControl = genCmdCast<PIPE_CONTROL *>(*pipeControlItor);
+        EXPECT_EQ(PIPE_CONTROL::POST_SYNC_OPERATION::POST_SYNC_OPERATION_WRITE_IMMEDIATE_DATA, pipeControl->getPostSyncOperation());
+        barrierNodeAddress = pipeControl->getAddress() | (static_cast<uint64_t>(pipeControl->getAddressHigh()) << 32);
+
+        // There shouldn't be any more semaphores before the barrier
+        EXPECT_EQ(pipeControlItor, find<MI_SEMAPHORE_WAIT *>(std::next(semaphoreItor), pipeControlItor));
+    }
+
+    {
+        HardwareParse bcsHwParser;
+        bcsHwParser.parseCommands<FamilyType>(pCmdQ->getBcsCommandStreamReceiver(aub_stream::ENGINE_BCS)->getCS(0), bcsStart);
+
+        const auto semaphoreItor = find<MI_SEMAPHORE_WAIT *>(bcsHwParser.cmdList.begin(), bcsHwParser.cmdList.end());
+        const auto semaphore = genCmdCast<MI_SEMAPHORE_WAIT *>(*semaphoreItor);
+        EXPECT_EQ(barrierNodeAddress, semaphore->getSemaphoreGraphicsAddress());
+        EXPECT_EQ(bcsHwParser.cmdList.end(), find<PIPE_CONTROL *>(semaphoreItor, bcsHwParser.cmdList.end()));
+
+        // Only one barrier semaphore from first BCS enqueue
+        const auto blitItor = find<XY_COPY_BLT *>(bcsHwParser.cmdList.begin(), bcsHwParser.cmdList.end());
+        EXPECT_EQ(1u, findAll<MI_SEMAPHORE_WAIT *>(bcsHwParser.cmdList.begin(), blitItor).size());
+    }
+
+    EXPECT_EQ(CL_SUCCESS, pCmdQ->finish());
+}
+
+HWTEST_F(OoqCommandQueueHwBlitTest, givenBlockedBlitAfterBarrierWhenEnqueueingCommandThenWaitForBlitBeforeBarrier) {
+    using MI_SEMAPHORE_WAIT = typename FamilyType::MI_SEMAPHORE_WAIT;
+    using PIPE_CONTROL = typename FamilyType::PIPE_CONTROL;
+
+    if (pCmdQ->getTimestampPacketContainer() == nullptr) {
+        GTEST_SKIP();
+    }
+    DebugManagerStateRestore restore{};
+    DebugManager.flags.DoCpuCopyOnReadBuffer.set(0);
+    DebugManager.flags.ForceCacheFlushForBcs.set(0);
+    DebugManager.flags.UpdateTaskCountFromWait.set(1);
+
+    UserEvent userEvent;
+    cl_event userEventWaitlist[] = {&userEvent};
+    MockKernelWithInternals mockKernelWithInternals(*pClDevice);
+    MockKernel *kernel = mockKernelWithInternals.mockKernel;
+    size_t offset = 0;
+    size_t gws = 1;
+    BufferDefaults::context = context;
+    auto buffer = clUniquePtr(BufferHelper<>::create());
+    char ptr[1] = {};
+
+    EXPECT_EQ(CL_SUCCESS, pCmdQ->enqueueReadBuffer(buffer.get(), CL_FALSE, 0, 1u, ptr, nullptr, 0, nullptr, nullptr));
+    EXPECT_EQ(CL_SUCCESS, pCmdQ->enqueueReadBuffer(buffer.get(), CL_FALSE, 0, 1u, ptr, nullptr, 0, nullptr, nullptr));
+    uint64_t lastBlitNodeAddress = TimestampPacketHelper::getContextEndGpuAddress(*pCmdQ->getTimestampPacketContainer()->peekNodes()[0]);
+    EXPECT_EQ(CL_SUCCESS, pCmdQ->enqueueKernel(kernel, 1, &offset, &gws, nullptr, 0, nullptr, nullptr));
+    auto ccsStart = pCmdQ->getGpgpuCommandStreamReceiver().getCS().getUsed();
+    auto bcsStart = pCmdQ->getBcsCommandStreamReceiver(aub_stream::ENGINE_BCS)->getCS(0).getUsed();
+    EXPECT_EQ(CL_SUCCESS, pCmdQ->enqueueBarrierWithWaitList(0, nullptr, nullptr));
+    EXPECT_EQ(CL_SUCCESS, pCmdQ->enqueueReadBuffer(buffer.get(), CL_FALSE, 0, 1u, ptr, nullptr, 1, userEventWaitlist, nullptr));
+
+    userEvent.setStatus(CL_COMPLETE);
+
+    uint64_t barrierNodeAddress = 0u;
+    {
+        HardwareParse ccsHwParser;
+        ccsHwParser.parseCommands<FamilyType>(pCmdQ->getGpgpuCommandStreamReceiver().getCS(0), ccsStart);
+
+        const auto semaphoreItor = find<MI_SEMAPHORE_WAIT *>(ccsHwParser.cmdList.begin(), ccsHwParser.cmdList.end());
+        const auto semaphore = genCmdCast<MI_SEMAPHORE_WAIT *>(*semaphoreItor);
+        EXPECT_EQ(lastBlitNodeAddress, semaphore->getSemaphoreGraphicsAddress());
+
+        const auto pipeControlItor = find<PIPE_CONTROL *>(semaphoreItor, ccsHwParser.cmdList.end());
+        const auto pipeControl = genCmdCast<PIPE_CONTROL *>(*pipeControlItor);
+        EXPECT_EQ(PIPE_CONTROL::POST_SYNC_OPERATION::POST_SYNC_OPERATION_WRITE_IMMEDIATE_DATA, pipeControl->getPostSyncOperation());
+        barrierNodeAddress = pipeControl->getAddress() | (static_cast<uint64_t>(pipeControl->getAddressHigh()) << 32);
+
+        // There shouldn't be any more semaphores before the barrier
+        EXPECT_EQ(pipeControlItor, find<MI_SEMAPHORE_WAIT *>(std::next(semaphoreItor), pipeControlItor));
+    }
+
+    {
+        HardwareParse bcsHwParser;
+        bcsHwParser.parseCommands<FamilyType>(pCmdQ->getBcsCommandStreamReceiver(aub_stream::ENGINE_BCS)->getCS(0), bcsStart);
+
+        const auto semaphoreItor = find<MI_SEMAPHORE_WAIT *>(bcsHwParser.cmdList.begin(), bcsHwParser.cmdList.end());
+        const auto semaphore = genCmdCast<MI_SEMAPHORE_WAIT *>(*semaphoreItor);
+        EXPECT_EQ(barrierNodeAddress, semaphore->getSemaphoreGraphicsAddress());
+        EXPECT_EQ(bcsHwParser.cmdList.end(), find<PIPE_CONTROL *>(semaphoreItor, bcsHwParser.cmdList.end()));
+    }
+
+    EXPECT_EQ(CL_SUCCESS, pCmdQ->finish());
 }

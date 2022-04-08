@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2022 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -10,7 +10,6 @@
 #include "opencl/source/api/cl_types.h"
 #include "opencl/source/command_queue/command_queue.h"
 #include "opencl/source/context/context.h"
-#include "opencl/source/device_queue/device_queue.h"
 #include "opencl/source/helpers/base_object.h"
 #include "opencl/source/mem_obj/buffer.h"
 #include "opencl/source/mem_obj/mem_obj.h"
@@ -23,6 +22,7 @@
 #include "opencl/test/unit_test/mocks/mock_buffer.h"
 #include "opencl/test/unit_test/mocks/mock_command_queue.h"
 #include "opencl/test/unit_test/mocks/mock_platform.h"
+#include "opencl/test/unit_test/mocks/mock_program.h"
 
 #include "gmock/gmock.h"
 
@@ -79,17 +79,16 @@ class MockObject : public MockObjectBase<BaseType> {};
 template <>
 class MockObject<Buffer> : public MockObjectBase<Buffer> {
   public:
-    void setArgStateful(void *memory, bool forceNonAuxMode, bool disableL3, bool alignSizeForAuxTranslation, bool isReadOnly, const Device &device) override {}
+    void setArgStateful(void *memory, bool forceNonAuxMode, bool disableL3, bool alignSizeForAuxTranslation, bool isReadOnly, const Device &device, bool useGlobalAtomics, bool areMultipleSubDevicesInContext) override {}
 };
 
 template <>
 class MockObject<Program> : public MockObjectBase<Program> {
   public:
-    MockObject() : MockObjectBase<Program>(*new ExecutionEnvironment()),
-                   executionEnvironment(&this->peekExecutionEnvironment()) {}
+    MockObject() : MockObjectBase<Program>(nullptr, false, toClDeviceVector(*(new MockClDevice(new MockDevice())))), device(this->clDevices[0]) {}
 
   private:
-    std::unique_ptr<ExecutionEnvironment> executionEnvironment;
+    std::unique_ptr<ClDevice> device;
 };
 
 typedef ::testing::Types<
@@ -100,8 +99,7 @@ typedef ::testing::Types<
     //Kernel,
     //Sampler
     //others...
-    MockCommandQueue,
-    DeviceQueue>
+    MockCommandQueue>
     BaseObjectTypes;
 
 typedef ::testing::Types<
@@ -110,8 +108,7 @@ typedef ::testing::Types<
     Context,
     Program,
     Buffer,
-    MockCommandQueue,
-    DeviceQueue>
+    MockCommandQueue>
     BaseObjectTypesForCastInvalidMagicTest;
 
 TYPED_TEST_CASE(BaseObjectTests, BaseObjectTypes);
@@ -287,13 +284,15 @@ TEST(CastToImage, WhenCastingFromMemObjThenBehavesAsExpected) {
 
 extern std::thread::id tempThreadID;
 class MockBuffer : public MockBufferStorage, public Buffer {
+    using MockBufferStorage::device;
+
   public:
     MockBuffer() : MockBufferStorage(),
-                   Buffer(nullptr, MemoryPropertiesHelper::createMemoryProperties(CL_MEM_USE_HOST_PTR, 0, 0, nullptr),
+                   Buffer(nullptr, ClMemoryPropertiesHelper::createMemoryProperties(CL_MEM_USE_HOST_PTR, 0, 0, MockBufferStorage::device.get()),
                           CL_MEM_USE_HOST_PTR, 0, sizeof(data), &data, &data, GraphicsAllocationHelper::toMultiGraphicsAllocation(&mockGfxAllocation), true, false, false) {
     }
 
-    void setArgStateful(void *memory, bool forceNonAuxMode, bool disableL3, bool alignSizeForAuxTranslation, bool isReadOnly, const Device &device) override {
+    void setArgStateful(void *memory, bool forceNonAuxMode, bool disableL3, bool alignSizeForAuxTranslation, bool isReadOnly, const Device &device, bool useGlobalAtomics, bool areMultipleSubDevicesInContext) override {
     }
 };
 
@@ -318,7 +317,7 @@ TYPED_TEST(BaseObjectTests, WhenObjectIsCreatedThenNumWaitersIsZero) {
     object->release();
 }
 
-TYPED_TEST(BaseObjectTests, WhenConvertingToInternalObjectThnRefApiCountIsSetToZero) {
+TYPED_TEST(BaseObjectTests, WhenConvertingToInternalObjectThenRefApiCountIsSetToZero) {
     class ObjectForTest : public NEO::MemObj {
       public:
         ObjectForTest() : MemObj(nullptr, 0, {}, 0, 0, 0u, nullptr, nullptr, 0, false, false, false) {

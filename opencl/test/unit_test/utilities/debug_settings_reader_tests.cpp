@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -8,9 +8,9 @@
 #include "shared/source/debug_settings/debug_settings_manager.h"
 #include "shared/source/helpers/file_io.h"
 #include "shared/source/utilities/debug_settings_reader.h"
+#include "shared/test/common/test_macros/test.h"
 
 #include "opencl/source/os_interface/ocl_reg_path.h"
-#include "test.h"
 
 #include "gtest/gtest.h"
 
@@ -30,7 +30,7 @@ class MockSettingsReader : public SettingsReader {
     const char *appSpecificLocation(const std::string &name) override { return name.c_str(); };
 };
 
-TEST(SettingsReader, Create) {
+TEST(SettingsReader, WhenCreatingSettingsReaderThenReaderIsCreated) {
     SettingsReader *reader = SettingsReader::create(oclRegPath);
     EXPECT_NE(nullptr, reader);
     delete reader;
@@ -45,7 +45,7 @@ TEST(SettingsReader, GivenNoSettingsFileWhenCreatingSettingsReaderThenOsReaderIs
     EXPECT_NE(nullptr, osReader.get());
 }
 
-TEST(SettingsReader, GivenSettingsFileExistsWhenCreatingSettingsReaderThenFileReaderIsCreated) {
+TEST(SettingsReader, GivenSettingsFileExistsWhenCreatingSettingsReaderThenReaderIsCreated) {
     bool settingsFileExists = fileExists(SettingsReader::settingsFileName);
     if (!settingsFileExists) {
         const char data[] = "ProductFamilyOverride = test";
@@ -59,7 +59,7 @@ TEST(SettingsReader, GivenSettingsFileExistsWhenCreatingSettingsReaderThenFileRe
     std::remove(SettingsReader::settingsFileName);
 }
 
-TEST(SettingsReader, CreateFileReader) {
+TEST(SettingsReader, WhenCreatingFileReaderThenReaderIsCreated) {
     bool settingsFileExists = fileExists(SettingsReader::settingsFileName);
     if (!settingsFileExists) {
         char data = 0;
@@ -74,30 +74,30 @@ TEST(SettingsReader, CreateFileReader) {
     delete reader;
 }
 
-TEST(SettingsReader, CreateOsReader) {
+TEST(SettingsReader, WhenCreatingOsReaderThenReaderIsCreated) {
     SettingsReader *reader = SettingsReader::createOsReader(false, oclRegPath);
     EXPECT_NE(nullptr, reader);
     delete reader;
 }
 
-TEST(SettingsReader, CreateOsReaderWithRegKey) {
+TEST(SettingsReader, GivenRegKeyWhenCreatingOsReaderThenReaderIsCreated) {
     std::string regKey = oclRegPath;
     std::unique_ptr<SettingsReader> reader(SettingsReader::createOsReader(false, regKey));
     EXPECT_NE(nullptr, reader);
 }
 
-TEST(SettingsReader, givenPrintDebugStringWhenCalledWithTrueItPrintsToOutput) {
+TEST(SettingsReader, GivenTrueWhenPrintingDebugStringThenPrintsToOutput) {
     int i = 4;
     testing::internal::CaptureStdout();
-    printDebugString(true, stdout, "testing error %d", i);
+    PRINT_DEBUG_STRING(true, stdout, "testing error %d", i);
     std::string output = testing::internal::GetCapturedStdout();
     EXPECT_STRNE(output.c_str(), "");
 }
 
-TEST(SettingsReader, givenPrintDebugStringWhenCalledWithFalseThenNothingIsPrinted) {
+TEST(SettingsReader, GivenFalseWhenPrintingDebugStringThenNoOutput) {
     int i = 4;
     testing::internal::CaptureStdout();
-    printDebugString(false, stderr, "Error String %d", i);
+    PRINT_DEBUG_STRING(false, stderr, "Error String %d", i);
     std::string output = testing::internal::GetCapturedStdout();
     EXPECT_STREQ(output.c_str(), "");
 }

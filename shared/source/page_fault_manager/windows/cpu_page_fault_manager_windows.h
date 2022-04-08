@@ -9,7 +9,7 @@
 
 #include "shared/source/page_fault_manager/cpu_page_fault_manager.h"
 
-#include <Windows.h>
+#include <windows.h>
 
 #include <functional>
 
@@ -25,7 +25,7 @@ class PageFaultManagerWindows : public PageFaultManager {
     void allowCPUMemoryAccess(void *ptr, size_t size) override;
     void protectCPUMemoryAccess(void *ptr, size_t size) override;
 
-    void broadcastWaitSignal() override;
+    void evictMemoryAfterImplCopy(GraphicsAllocation *allocation, Device *device) override;
 
     static std::function<LONG(struct _EXCEPTION_POINTERS *exceptionInfo)> pageFaultHandler;
     PVOID previousHandler;

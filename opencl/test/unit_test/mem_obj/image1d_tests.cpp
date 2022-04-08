@@ -1,16 +1,17 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
  */
 
-#include "opencl/source/helpers/memory_properties_helpers.h"
+#include "shared/test/common/test_macros/test.h"
+
+#include "opencl/source/helpers/cl_memory_properties_helpers.h"
 #include "opencl/source/mem_obj/buffer.h"
 #include "opencl/source/mem_obj/image.h"
 #include "opencl/test/unit_test/fixtures/cl_device_fixture.h"
 #include "opencl/test/unit_test/mocks/mock_context.h"
-#include "test.h"
 
 using namespace NEO;
 
@@ -70,12 +71,12 @@ class CreateImage1DTest : public ClDeviceFixture,
 
 typedef CreateImage1DTest CreateImage1DType;
 
-HWTEST_P(CreateImage1DType, validTypes) {
+HWTEST_P(CreateImage1DType, GivenValidTypeWhenCreatingImageThenImageParamsAreCorrect) {
     cl_mem_flags flags = CL_MEM_READ_WRITE;
     auto surfaceFormat = Image::getSurfaceFormatFromTable(flags, &imageFormat, pClDevice->getHardwareInfo().capabilityTable.supportsOcl21Features);
     auto image = Image::create(
         context,
-        MemoryPropertiesHelper::createMemoryProperties(flags, 0, 0, pDevice),
+        ClMemoryPropertiesHelper::createMemoryProperties(flags, 0, 0, pDevice),
         flags,
         0,
         surfaceFormat,
@@ -137,6 +138,6 @@ static cl_mem_object_type Image1DTypes[] = {
     CL_MEM_OBJECT_IMAGE1D_ARRAY};
 
 INSTANTIATE_TEST_CASE_P(
-    CreateImage1DTest_Create,
+    CreateImage1DTestCreate,
     CreateImage1DType,
     testing::ValuesIn(Image1DTypes));

@@ -1,16 +1,17 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
  */
 
+#include "shared/test/common/mocks/mock_graphics_allocation.h"
+
 #include "opencl/source/cl_device/cl_device.h"
-#include "opencl/source/helpers/memory_properties_helpers.h"
+#include "opencl/source/helpers/cl_memory_properties_helpers.h"
 #include "opencl/source/mem_obj/mem_obj.h"
 #include "opencl/source/sharings/sharing.h"
 #include "opencl/test/unit_test/mocks/mock_context.h"
-#include "opencl/test/unit_test/mocks/mock_graphics_allocation.h"
 
 #include "gtest/gtest.h"
 
@@ -41,7 +42,7 @@ TEST(sharingHandler, givenMemObjWhenAcquireIncrementCounterThenReleaseShouldDecr
     MockGraphicsAllocation *mockAllocation = new MockGraphicsAllocation(buffer, sizeof(buffer));
     std::unique_ptr<MemObj> memObj(
         new MemObj(&context, CL_MEM_OBJECT_BUFFER,
-                   MemoryPropertiesHelper::createMemoryProperties(CL_MEM_USE_HOST_PTR, 0, 0, &context.getDevice(0)->getDevice()),
+                   ClMemoryPropertiesHelper::createMemoryProperties(CL_MEM_USE_HOST_PTR, 0, 0, &context.getDevice(0)->getDevice()),
                    CL_MEM_USE_HOST_PTR, 0, sizeof(buffer), buffer, buffer, GraphicsAllocationHelper::toMultiGraphicsAllocation(mockAllocation), true, false, false));
 
     struct MockSharingHandler : SharingHandler {
@@ -65,7 +66,7 @@ TEST(sharingHandler, givenMemObjWhenAcquireTwoTimesThenReleaseShouldBeCalledTwoT
     MockGraphicsAllocation *mockAllocation = new MockGraphicsAllocation(buffer, sizeof(buffer));
     std::unique_ptr<MemObj> memObj(
         new MemObj(&context, CL_MEM_OBJECT_BUFFER,
-                   MemoryPropertiesHelper::createMemoryProperties(CL_MEM_USE_HOST_PTR, 0, 0, &context.getDevice(0)->getDevice()),
+                   ClMemoryPropertiesHelper::createMemoryProperties(CL_MEM_USE_HOST_PTR, 0, 0, &context.getDevice(0)->getDevice()),
                    CL_MEM_USE_HOST_PTR, 0, sizeof(buffer), buffer, buffer, GraphicsAllocationHelper::toMultiGraphicsAllocation(mockAllocation), true, false, false));
 
     struct MockSharingHandler : SharingHandler {
@@ -108,7 +109,7 @@ TEST(sharingHandler, givenSharingHandlerWhenAcquiringThenReturnErrorCode) {
     MockContext context;
     MockGraphicsAllocation *graphicsAllocation = new MockGraphicsAllocation(nullptr, 0);
     MemObj memObj(&context, CL_MEM_OBJECT_BUFFER,
-                  MemoryPropertiesHelper::createMemoryProperties(CL_MEM_USE_HOST_PTR, 0, 0, &context.getDevice(0)->getDevice()),
+                  ClMemoryPropertiesHelper::createMemoryProperties(CL_MEM_USE_HOST_PTR, 0, 0, &context.getDevice(0)->getDevice()),
                   CL_MEM_USE_HOST_PTR, 0, 1, nullptr, nullptr, GraphicsAllocationHelper::toMultiGraphicsAllocation(graphicsAllocation), true, false, false);
 
     auto result = sharingHandler.acquire(&memObj, graphicsAllocation->getRootDeviceIndex());

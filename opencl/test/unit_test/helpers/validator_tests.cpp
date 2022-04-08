@@ -1,16 +1,17 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2022 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
  */
 
 #include "shared/source/helpers/ptr_math.h"
+#include "shared/source/helpers/validators.h"
 
 #include "opencl/source/api/cl_types.h"
 #include "opencl/source/helpers/base_object.h"
+#include "opencl/source/helpers/cl_validators.h"
 #include "opencl/source/helpers/error_mappers.h"
-#include "opencl/source/helpers/validators.h"
 #include "opencl/test/unit_test/mocks/mock_buffer.h"
 #include "opencl/test/unit_test/mocks/mock_context.h"
 #include "opencl/test/unit_test/mocks/mock_platform.h"
@@ -53,7 +54,6 @@ REGISTER_TYPED_TEST_CASE_P(
 // Define new command types to run the parameterized tests
 typedef ::testing::Types<
     cl_command_queue,
-    device_queue, // internal type
     cl_context,
     cl_device_id,
     cl_event,
@@ -167,6 +167,12 @@ TEST(Platform, GivenValidPlatformWhenValidatingThenSuccessIsReturned) {
     EXPECT_EQ(CL_SUCCESS, validateObjects(clPlatformId));
 }
 
+TEST(ValidatorBool, GivenBoolFlagWhenValidatingObjectThenCorrectValueIsReturned) {
+    EXPECT_EQ(CL_INVALID_VALUE, validateObject(false));
+    EXPECT_EQ(CL_INVALID_VALUE, validateObjects(false, true));
+    EXPECT_EQ(CL_SUCCESS, validateObject(true));
+}
+
 typedef ::testing::TestWithParam<size_t> PatternSizeValid;
 
 TEST_P(PatternSizeValid, GivenValidPatternSizeWhenValidatingThenSuccessIsReturned) {
@@ -248,7 +254,7 @@ TEST(validateYuvOperation, GivenValidateYuvOperationWhenNullRegionThenReturnFail
     EXPECT_EQ(CL_INVALID_VALUE, ret);
 }
 
-TEST(areNotNullptr, WhenGivenAllNonNullParamsTheReturnsTrue) {
+TEST(areNotNullptr, WhenGivenAllNonNullParamsThenReturnsTrue) {
     int a = 0;
     int b = 0;
     int c = 0;
@@ -257,7 +263,7 @@ TEST(areNotNullptr, WhenGivenAllNonNullParamsTheReturnsTrue) {
     EXPECT_TRUE(areNotNullptr(&a, &b, &c));
 }
 
-TEST(areNotNullptr, WhenGivenAllNullParamsTheReturnsFalse) {
+TEST(areNotNullptr, WhenGivenAllNullParamsThenReturnsFalse) {
     int *a = nullptr;
     int *b = nullptr;
     int *c = nullptr;
@@ -266,7 +272,7 @@ TEST(areNotNullptr, WhenGivenAllNullParamsTheReturnsFalse) {
     EXPECT_FALSE(areNotNullptr(a, b, c));
 }
 
-TEST(areNotNullptr, WhenGivenNullParameterAmongNonNullParamsTheReturnsFalse) {
+TEST(areNotNullptr, WhenGivenNullParameterAmongNonNullParamsThenReturnsFalse) {
     int *a = nullptr;
     int b = 0;
     int c = 0;

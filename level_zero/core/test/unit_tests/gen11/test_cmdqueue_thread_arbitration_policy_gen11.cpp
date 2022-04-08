@@ -1,16 +1,15 @@
 /*
- * Copyright (C) 2020 Intel Corporation
+ * Copyright (C) 2020-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
  */
 
 #include "shared/source/gen9/reg_configs.h"
-#include "shared/test/unit_test/cmd_parse/gen_cmd_parse.h"
-#include "shared/test/unit_test/helpers/debug_manager_state_restore.h"
-
-#include "opencl/source/helpers/hardware_commands_helper.h"
-#include "test.h"
+#include "shared/test/common/cmd_parse/gen_cmd_parse.h"
+#include "shared/test/common/helpers/debug_manager_state_restore.h"
+#include "shared/test/common/mocks/mock_compilers.h"
+#include "shared/test/common/test_macros/test.h"
 
 #include "level_zero/core/source/driver/driver_imp.h"
 #include "level_zero/core/test/unit_tests/fixtures/device_fixture.h"
@@ -22,6 +21,8 @@ namespace ult {
 
 struct CommandQueueThreadArbitrationPolicyTests : public ::testing::Test {
     void SetUp() override {
+        NEO::MockCompilerEnableGuard mock(true);
+        ze_result_t returnValue = ZE_RESULT_SUCCESS;
         auto executionEnvironment = new NEO::ExecutionEnvironment();
         auto mockBuiltIns = new MockBuiltins();
         executionEnvironment->prepareRootDeviceEnvironments(1);
@@ -33,7 +34,7 @@ struct CommandQueueThreadArbitrationPolicyTests : public ::testing::Test {
         std::vector<std::unique_ptr<NEO::Device>> devices;
         devices.push_back(std::unique_ptr<NEO::Device>(neoDevice));
 
-        auto driverHandleUlt = whitebox_cast(DriverHandle::create(std::move(devices), L0EnvVariables{}));
+        auto driverHandleUlt = whitebox_cast(DriverHandle::create(std::move(devices), L0EnvVariables{}, &returnValue));
         driverHandle.reset(driverHandleUlt);
 
         ASSERT_NE(nullptr, driverHandle);
@@ -49,10 +50,12 @@ struct CommandQueueThreadArbitrationPolicyTests : public ::testing::Test {
         commandQueue = whitebox_cast(CommandQueue::create(productFamily, device,
                                                           neoDevice->getDefaultEngine().commandStreamReceiver,
                                                           &queueDesc,
-                                                          false));
+                                                          false,
+                                                          false,
+                                                          returnValue));
         ASSERT_NE(nullptr, commandQueue->commandStream);
 
-        commandList = CommandList::create(productFamily, device, false);
+        commandList = CommandList::create(productFamily, device, NEO::EngineGroupType::RenderCompute, 0u, returnValue);
         ASSERT_NE(nullptr, commandList);
     }
     void TearDown() override {

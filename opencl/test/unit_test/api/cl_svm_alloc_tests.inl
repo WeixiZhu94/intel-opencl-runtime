@@ -1,15 +1,15 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
  */
 
 #include "shared/source/device/device.h"
+#include "shared/test/common/mocks/mock_memory_manager.h"
 #include "shared/test/unit_test/utilities/base_object_utils.h"
 
 #include "opencl/source/context/context.h"
-#include "opencl/test/unit_test/mocks/mock_memory_manager.h"
 #include "opencl/test/unit_test/mocks/mock_platform.h"
 #include "opencl/test/unit_test/test_macros/test_checks_ocl.h"
 
@@ -194,6 +194,51 @@ TEST_F(clSVMAllocTests, GivenZeroAlignmentWhenAllocatingSvmThenSvmIsAllocated) {
     }
 }
 
+TEST_F(clSVMAllocTests, givenUnrestrictedFlagWhenCreatingSvmAllocThenAllowSizeBiggerThanMaxMemAllocSize) {
+    REQUIRE_SVM_OR_SKIP(pDevice);
+
+    const size_t maxMemAllocSize = 128;
+
+    static_cast<MockDevice &>(pDevice->getDevice()).deviceInfo.maxMemAllocSize = maxMemAllocSize;
+
+    size_t allowedSize = maxMemAllocSize;
+    size_t notAllowedSize = maxMemAllocSize + 1;
+
+    cl_mem_flags flags = 0;
+    void *svmPtr = nullptr;
+
+    {
+        // no flag + not allowed size
+        svmPtr = clSVMAlloc(pContext, flags, notAllowedSize, 0);
+        EXPECT_EQ(nullptr, svmPtr);
+    }
+
+    flags = CL_MEM_ALLOW_UNRESTRICTED_SIZE_INTEL;
+
+    {
+        // unrestricted size flag + not allowed size
+        svmPtr = clSVMAlloc(pContext, flags, notAllowedSize, 0);
+        EXPECT_NE(nullptr, svmPtr);
+        clSVMFree(pContext, svmPtr);
+    }
+
+    {
+        // debug flag + not allowed size
+        DebugManagerStateRestore restorer;
+        DebugManager.flags.AllowUnrestrictedSize.set(1);
+        svmPtr = clSVMAlloc(pContext, 0, notAllowedSize, 0);
+        EXPECT_NE(nullptr, svmPtr);
+        clSVMFree(pContext, svmPtr);
+    }
+
+    {
+        // unrestricted size flag + allowed size
+        svmPtr = clSVMAlloc(pContext, flags, allowedSize, 0);
+        EXPECT_NE(nullptr, svmPtr);
+        clSVMFree(pContext, svmPtr);
+    }
+}
+
 TEST_F(clSVMAllocTests, GivenUnalignedSizeAndDefaultAlignmentWhenAllocatingSvmThenSvmIsAllocated) {
     const ClDeviceInfo &devInfo = pDevice->getDeviceInfo();
     if (devInfo.svmCapabilities != 0) {
@@ -244,7 +289,7 @@ TEST(clSvmAllocTest, givenSubDeviceWhenCreatingSvmAllocThenProperDeviceBitfieldI
     std::swap(memoryManagerBackup, executionEnvironment->memoryManager);
 
     MockContext context(device);
-    auto expectedDeviceBitfield = context.getDeviceBitfieldForAllocation();
+    auto expectedDeviceBitfield = context.getDeviceBitfieldForAllocation(device->getRootDeviceIndex());
     EXPECT_NE(expectedDeviceBitfield, memoryManager->recentlyPassedDeviceBitfield);
     auto svmPtr = clSVMAlloc(&context, CL_MEM_READ_WRITE, MemoryConstants::pageSize, MemoryConstants::cacheLineSize);
     EXPECT_NE(nullptr, svmPtr);

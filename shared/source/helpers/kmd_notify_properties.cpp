@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -18,8 +18,14 @@ bool KmdNotifyHelper::obtainTimeoutParams(int64_t &timeoutValueOutput,
                                           uint32_t currentHwTag,
                                           uint32_t taskCountToWait,
                                           FlushStamp flushStampToWait,
-                                          bool forcePowerSavingMode) {
+                                          bool forcePowerSavingMode,
+                                          bool kmdWaitModeActive,
+                                          bool directSubmissionEnabled) {
     if (flushStampToWait == 0) {
+        return false;
+    }
+
+    if (!kmdWaitModeActive) {
         return false;
     }
 
@@ -39,6 +45,8 @@ bool KmdNotifyHelper::obtainTimeoutParams(int64_t &timeoutValueOutput,
         timeoutValueOutput = KmdNotifyConstants::timeoutInMicrosecondsForDisconnectedAcLine;
     } else if (quickKmdSleepRequest && properties->enableQuickKmdSleep) {
         timeoutValueOutput = properties->delayQuickKmdSleepMicroseconds;
+    } else if (directSubmissionEnabled && properties->enableQuickKmdSleepForDirectSubmission) {
+        timeoutValueOutput = properties->delayQuickKmdSleepForDirectSubmissionMicroseconds;
     } else {
         timeoutValueOutput = getBaseTimeout(multiplier);
     }

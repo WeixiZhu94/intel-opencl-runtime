@@ -1,3 +1,11 @@
+<!---
+
+Copyright (C) 2020-2021 Intel Corporation
+
+SPDX-License-Identifier: MIT
+
+-->
+
 # Building NEO driver
 
 Instructions have been tested on Ubuntu* and CentOS*. They assume a clean installation of a stable version.
@@ -15,9 +23,6 @@ Example (CentOS):
 ```shell
 sudo dnf install gcc-c++ cmake git make
 ```
-
-See [LIMITATIONS.md](https://github.com/intel/compute-runtime/blob/master/opencl/doc/LIMITATIONS.md)
-for other requirements and dependencies, when building and installing NEO.
 
 2. Install required dependencies
 
@@ -63,7 +68,7 @@ Example:
 
 ```shell
 cd build
-cmake -DCMAKE_BUILD_TYPE=Release -DSKIP_UNIT_TESTS=1 ../neo
+cmake -DCMAKE_BUILD_TYPE=Release -DNEO_SKIP_UNIT_TESTS=1 ../neo
 make -j`nproc`
 sudo make install
 ```

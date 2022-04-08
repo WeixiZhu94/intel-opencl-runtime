@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 Intel Corporation
+ * Copyright (C) 2020-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -21,6 +21,10 @@ namespace NEO {
 GraphicsAllocation *allocateGlobalsSurface(NEO::SVMAllocsManager *const svmAllocManager, NEO::Device &device, size_t size, bool constant,
                                            LinkerInput *const linkerInput, const void *initData) {
     bool globalsAreExported = false;
+    GraphicsAllocation *gpuAllocation = nullptr;
+    auto rootDeviceIndex = device.getRootDeviceIndex();
+    auto deviceBitfield = device.getDeviceBitfield();
+
     if (linkerInput != nullptr) {
         globalsAreExported = constant ? linkerInput->getTraits().exportsGlobalConstants : linkerInput->getTraits().exportsGlobalVariables;
     }
@@ -30,37 +34,41 @@ GraphicsAllocation *allocateGlobalsSurface(NEO::SVMAllocsManager *const svmAlloc
         svmProps.coherent = false;
         svmProps.readOnly = constant;
         svmProps.hostPtrReadOnly = constant;
-        auto ptr = svmAllocManager->createSVMAlloc(device.getRootDeviceIndex(), size, svmProps, device.getDeviceBitfield());
+
+        std::set<uint32_t> rootDeviceIndices;
+        rootDeviceIndices.insert(rootDeviceIndex);
+        std::map<uint32_t, DeviceBitfield> subDeviceBitfields;
+        subDeviceBitfields.insert({rootDeviceIndex, deviceBitfield});
+        auto ptr = svmAllocManager->createSVMAlloc(size, svmProps, rootDeviceIndices, subDeviceBitfields);
         DEBUG_BREAK_IF(ptr == nullptr);
         if (ptr == nullptr) {
             return nullptr;
         }
         auto svmAlloc = svmAllocManager->getSVMAlloc(ptr);
         UNRECOVERABLE_IF(svmAlloc == nullptr);
-        auto gpuAlloc = svmAlloc->gpuAllocations.getGraphicsAllocation(device.getRootDeviceIndex());
-        UNRECOVERABLE_IF(gpuAlloc == nullptr);
-        device.getMemoryManager()->copyMemoryToAllocation(gpuAlloc, initData, static_cast<uint32_t>(size));
-        return gpuAlloc;
+        gpuAllocation = svmAlloc->gpuAllocations.getGraphicsAllocation(rootDeviceIndex);
     } else {
         auto allocationType = constant ? GraphicsAllocation::AllocationType::CONSTANT_SURFACE : GraphicsAllocation::AllocationType::GLOBAL_SURFACE;
-        auto gpuAlloc = device.getMemoryManager()->allocateGraphicsMemoryWithProperties({device.getRootDeviceIndex(),
+        gpuAllocation = device.getMemoryManager()->allocateGraphicsMemoryWithProperties({rootDeviceIndex,
                                                                                          true, // allocateMemory
                                                                                          size, allocationType,
                                                                                          false, // isMultiStorageAllocation
-                                                                                         device.getDeviceBitfield()});
-        DEBUG_BREAK_IF(gpuAlloc == nullptr);
-        if (gpuAlloc == nullptr) {
-            return nullptr;
-        }
-        auto &hwInfo = device.getHardwareInfo();
-        auto &helper = HwHelper::get(hwInfo.platform.eRenderCoreFamily);
-        if (gpuAlloc->isAllocatedInLocalMemoryPool() && helper.isBlitCopyRequiredForLocalMemory(hwInfo)) {
-            BlitHelperFunctions::blitMemoryToAllocation(device, gpuAlloc, 0, initData, {size, 1, 1});
-        } else {
-            memcpy_s(gpuAlloc->getUnderlyingBuffer(), gpuAlloc->getUnderlyingBufferSize(), initData, size);
-        }
-        return gpuAlloc;
+                                                                                         deviceBitfield});
     }
+
+    if (!gpuAllocation) {
+        return nullptr;
+    }
+
+    auto &hwInfo = device.getHardwareInfo();
+    auto &helper = HwHelper::get(hwInfo.platform.eRenderCoreFamily);
+
+    auto success = MemoryTransferHelper::transferMemoryToAllocation(helper.isBlitCopyRequiredForLocalMemory(hwInfo, *gpuAllocation),
+                                                                    device, gpuAllocation, 0, initData, size);
+
+    UNRECOVERABLE_IF(!success);
+
+    return gpuAllocation;
 }
 
 } // namespace NEO

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019-2020 Intel Corporation
+ * Copyright (C) 2020-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -35,17 +35,24 @@ struct CommandQueueHw : public CommandQueueImp {
 
     void dispatchTaskCountWrite(NEO::LinearStream &commandStream, bool flushDataCache) override;
 
-    void programGeneralStateBaseAddress(uint64_t gsba, bool useLocalMemoryForIndirectHeap, NEO::LinearStream &commandStream);
+    void programStateBaseAddress(uint64_t gsba, bool useLocalMemoryForIndirectHeap, NEO::LinearStream &commandStream, bool cachedMOCSAllowed);
     size_t estimateStateBaseAddressCmdSize();
-    void programFrontEnd(uint64_t scratchAddress, NEO::LinearStream &commandStream);
+    MOCKABLE_VIRTUAL void programFrontEnd(uint64_t scratchAddress, uint32_t perThreadScratchSpaceSize, NEO::LinearStream &commandStream);
 
+    MOCKABLE_VIRTUAL size_t estimateFrontEndCmdSizeForMultipleCommandLists(bool isFrontEndStateDirty, uint32_t numCommandLists,
+                                                                           ze_command_list_handle_t *phCommandLists);
     size_t estimateFrontEndCmdSize();
     size_t estimatePipelineSelect();
     void programPipelineSelect(NEO::LinearStream &commandStream);
 
-    void handleScratchSpace(NEO::ResidencyContainer &residency,
-                            NEO::ScratchSpaceController *scratchController,
-                            bool &gsbaState, bool &frontEndState);
+    MOCKABLE_VIRTUAL void handleScratchSpace(NEO::HeapContainer &heapContainer,
+                                             NEO::ScratchSpaceController *scratchController,
+                                             bool &gsbaState, bool &frontEndState,
+                                             uint32_t perThreadScratchSpaceSize,
+                                             uint32_t perThreadPrivateScratchSize);
+
+    bool getPreemptionCmdProgramming() override;
+    void patchCommands(CommandList &commandList, uint64_t scratchAddress);
 };
 
 } // namespace L0

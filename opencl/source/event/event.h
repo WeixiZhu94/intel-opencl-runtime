@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -8,15 +8,16 @@
 #pragma once
 #include "shared/source/helpers/flush_stamp.h"
 #include "shared/source/os_interface/os_time.h"
+#include "shared/source/os_interface/performance_counters.h"
 #include "shared/source/utilities/arrayref.h"
+#include "shared/source/utilities/hw_timestamps.h"
 #include "shared/source/utilities/idlist.h"
 #include "shared/source/utilities/iflist.h"
 
 #include "opencl/source/api/cl_types.h"
-#include "opencl/source/event/hw_timestamps.h"
+#include "opencl/source/command_queue/copy_engine_state.h"
 #include "opencl/source/helpers/base_object.h"
 #include "opencl/source/helpers/task_information.h"
-#include "opencl/source/os_interface/performance_counters.h"
 
 #include <atomic>
 #include <cstdint>
@@ -24,7 +25,7 @@
 
 namespace NEO {
 template <typename TagType>
-struct TagNode;
+class TagNode;
 class CommandQueue;
 class Context;
 class Device;
@@ -88,6 +89,9 @@ class Event : public BaseObject<_cl_event>, public IDNode<Event> {
 
     ~Event() override;
 
+    void setupBcs(aub_stream::EngineType bcsEngineType);
+    uint32_t peekBcsTaskCountFromCommandQueue();
+
     uint32_t getCompletionStamp() const;
     void updateCompletionStamp(uint32_t taskCount, uint32_t bcsTaskCount, uint32_t tasklevel, FlushStamp flushStamp);
     cl_ulong getDelta(cl_ulong startTime,
@@ -106,7 +110,7 @@ class Event : public BaseObject<_cl_event>, public IDNode<Event> {
 
     void setProfilingEnabled(bool profilingEnabled) { this->profilingEnabled = profilingEnabled; }
 
-    TagNode<HwTimeStamps> *getHwTimeStampNode();
+    TagNodeBase *getHwTimeStampNode();
 
     void addTimestampPacketNodes(const TimestampPacketContainer &inputTimestampPacketContainer);
     TimestampPacketContainer *getTimestampPacketNodes() const;
@@ -119,7 +123,7 @@ class Event : public BaseObject<_cl_event>, public IDNode<Event> {
         this->perfCountersEnabled = perfCountersEnabled;
     }
 
-    TagNode<HwPerfCounter> *getHwPerfCounterNode();
+    TagNodeBase *getHwPerfCounterNode();
 
     std::unique_ptr<FlushStampTracker> flushStamp;
     std::atomic<uint32_t> taskLevel;
@@ -222,6 +226,10 @@ class Event : public BaseObject<_cl_event>, public IDNode<Event> {
         return cmdQueue;
     }
 
+    const CommandQueue *getCommandQueue() const {
+        return cmdQueue;
+    }
+
     cl_command_type getCommandType() {
         return cmdType;
     }
@@ -249,7 +257,7 @@ class Event : public BaseObject<_cl_event>, public IDNode<Event> {
             return;
         }
 
-        this->bcsTaskCount = bcsTaskCount;
+        this->bcsState.taskCount = bcsTaskCount;
         uint32_t prevTaskCount = this->taskCount.exchange(gpgpuTaskCount);
         if ((prevTaskCount != CompletionStamp::notReady) && (prevTaskCount > gpgpuTaskCount)) {
             this->taskCount = prevTaskCount;
@@ -276,10 +284,6 @@ class Event : public BaseObject<_cl_event>, public IDNode<Event> {
         this->queueTimeStamp = *queueTimeStamp;
     };
 
-    void setSubmitTimeStamp(TimeStampData *submitTimeStamp) {
-        this->submitTimeStamp = *submitTimeStamp;
-    };
-
     void setQueueTimeStamp();
     void setSubmitTimeStamp();
 
@@ -297,6 +301,8 @@ class Event : public BaseObject<_cl_event>, public IDNode<Event> {
     }
 
     static bool checkUserEventDependencies(cl_uint numEventsInWaitList, const cl_event *eventWaitList);
+
+    static void getBoundaryTimestampValues(TimestampPacketContainer *timestampContainer, uint64_t &globalStartTS, uint64_t &globalEndTS);
 
   protected:
     Event(Context *ctx, CommandQueue *cmdQueue, cl_command_type cmdType,
@@ -320,6 +326,8 @@ class Event : public BaseObject<_cl_event>, public IDNode<Event> {
         }
     }
 
+    void calculateSubmitTimestampData();
+    uint64_t getTimeInNSFromTimestampData(const TimeStampData &timestamp) const;
     bool calcProfilingData();
     MOCKABLE_VIRTUAL void calculateProfilingDataInternal(uint64_t contextStartTS, uint64_t contextEndTS, uint64_t *contextCompleteTS, uint64_t globalStartTS);
     MOCKABLE_VIRTUAL void synchronizeTaskCount() {
@@ -364,10 +372,10 @@ class Event : public BaseObject<_cl_event>, public IDNode<Event> {
     uint64_t startTimeStamp;
     uint64_t endTimeStamp;
     uint64_t completeTimeStamp;
-    uint32_t bcsTaskCount = 0;
+    CopyEngineState bcsState{};
     bool perfCountersEnabled;
-    TagNode<HwTimeStamps> *timeStampNode = nullptr;
-    TagNode<HwPerfCounter> *perfCounterNode = nullptr;
+    TagNodeBase *timeStampNode = nullptr;
+    TagNodeBase *perfCounterNode = nullptr;
     std::unique_ptr<TimestampPacketContainer> timestampPacketContainer;
     //number of events this event depends on
     std::atomic<int> parentCount;

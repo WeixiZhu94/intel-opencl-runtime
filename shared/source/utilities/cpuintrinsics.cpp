@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019-2020 Intel Corporation
+ * Copyright (C) 2020-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -7,7 +7,11 @@
 
 #include "shared/source/utilities/cpuintrinsics.h"
 
+#if defined(__ARM_ARCH)
+#include <sse2neon.h>
+#else
 #include <emmintrin.h>
+#endif
 
 namespace NEO {
 namespace CpuIntrinsics {

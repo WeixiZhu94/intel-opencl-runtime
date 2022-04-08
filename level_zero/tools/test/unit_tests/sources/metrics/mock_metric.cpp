@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 Intel Corporation
+ * Copyright (C) 2020-2022 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -7,39 +7,47 @@
 
 #include "level_zero/tools/test/unit_tests/sources/metrics/mock_metric.h"
 
+#include "shared/source/command_container/implicit_scaling.h"
+#include "shared/test/common/mocks/mock_os_library.h"
+
+#include "level_zero/tools/source/metrics/metric_streamer_imp.h"
+
 using namespace MetricsLibraryApi;
+
+using ::testing::_;
+using ::testing::Return;
 
 namespace L0 {
 namespace ult {
 
-void MetricDeviceFixture::SetUp() {
+void MetricContextFixture::SetUp() {
 
     // Call base class.
-    DeviceFixture::SetUp();
+    ContextFixture::SetUp();
 
     // Initialize metric api.
-    ze_result_t result = ZE_RESULT_SUCCESS;
-    MetricContext::enableMetricApi(result);
-    EXPECT_EQ(result, ZE_RESULT_SUCCESS);
     auto &metricContext = device->getMetricContext();
     metricContext.setInitializationState(ZE_RESULT_SUCCESS);
 
     // Mock metrics library.
     mockMetricsLibrary = std::unique_ptr<Mock<MetricsLibrary>>(new (std::nothrow) Mock<MetricsLibrary>(metricContext));
     mockMetricsLibrary->setMockedApi(&mockMetricsLibraryApi);
+    mockMetricsLibrary->handle = new MockOsLibrary();
 
     //  Mock metric enumeration.
     mockMetricEnumeration = std::unique_ptr<Mock<MetricEnumeration>>(new (std::nothrow) Mock<MetricEnumeration>(metricContext));
     mockMetricEnumeration->setMockedApi(&mockMetricsDiscoveryApi);
+    mockMetricEnumeration->hMetricsDiscovery = std::make_unique<MockOsLibrary>();
 
     // Metrics Discovery device common settings.
     metricsDeviceParams.Version.MajorNumber = MetricEnumeration::requiredMetricsDiscoveryMajorVersion;
     metricsDeviceParams.Version.MinorNumber = MetricEnumeration::requiredMetricsDiscoveryMinorVersion;
 }
 
-void MetricDeviceFixture::TearDown() {
+void MetricContextFixture::TearDown() {
 
     // Restore original metrics library
+    delete mockMetricsLibrary->handle;
     mockMetricsLibrary->setMockedApi(nullptr);
     mockMetricsLibrary.reset();
 
@@ -48,7 +56,232 @@ void MetricDeviceFixture::TearDown() {
     mockMetricEnumeration.reset();
 
     // Call base class.
-    DeviceFixture::TearDown();
+    ContextFixture::TearDown();
+}
+
+void MetricContextFixture::openMetricsAdapter() {
+
+    EXPECT_CALL(*mockMetricEnumeration, loadMetricsDiscovery())
+        .Times(0);
+
+    EXPECT_CALL(*mockMetricEnumeration->g_mockApi, MockOpenAdapterGroup(_))
+        .Times(1)
+        .WillOnce(DoAll(::testing::SetArgPointee<0>(&adapterGroup), Return(TCompletionCode::CC_OK)));
+
+    EXPECT_CALL(adapter, OpenMetricsDevice(_))
+        .Times(1)
+        .WillOnce(DoAll(::testing::SetArgPointee<0>(&metricsDevice), Return(TCompletionCode::CC_OK)));
+
+    EXPECT_CALL(adapter, CloseMetricsDevice(_))
+        .Times(1)
+        .WillOnce(Return(TCompletionCode::CC_OK));
+
+    EXPECT_CALL(adapterGroup, GetAdapter(_))
+        .Times(0);
+
+    EXPECT_CALL(*mockMetricEnumeration, getMetricsAdapter())
+        .Times(1)
+        .WillOnce(Return(&adapter));
+
+    EXPECT_CALL(adapterGroup, Close())
+        .Times(1)
+        .WillOnce(Return(TCompletionCode::CC_OK));
+}
+
+void MetricContextFixture::openMetricsAdapterGroup() {
+
+    EXPECT_CALL(*mockMetricEnumeration, loadMetricsDiscovery())
+        .Times(0);
+
+    EXPECT_CALL(*mockMetricEnumeration->g_mockApi, MockOpenAdapterGroup(_))
+        .Times(1)
+        .WillOnce(DoAll(::testing::SetArgPointee<0>(&adapterGroup), Return(TCompletionCode::CC_OK)));
+
+    EXPECT_CALL(adapter, OpenMetricsDevice(_))
+        .Times(1)
+        .WillOnce(DoAll(::testing::SetArgPointee<0>(&metricsDevice), Return(TCompletionCode::CC_OK)));
+
+    EXPECT_CALL(adapter, CloseMetricsDevice(_))
+        .Times(1)
+        .WillOnce(Return(TCompletionCode::CC_OK));
+
+    EXPECT_CALL(adapterGroup, Close())
+        .Times(1)
+        .WillOnce(Return(TCompletionCode::CC_OK));
+}
+
+void MetricMultiDeviceFixture::SetUp() {
+    DebugManager.flags.EnableImplicitScaling.set(1);
+
+    MultiDeviceFixture::SetUp();
+
+    devices.resize(driverHandle->devices.size());
+
+    for (uint32_t i = 0; i < driverHandle->devices.size(); i++) {
+        devices[i] = driverHandle->devices[i];
+    }
+
+    // Initialize metric api.
+    auto &metricContext = devices[0]->getMetricContext();
+
+    // Mock metrics library.
+    mockMetricsLibrary = std::unique_ptr<Mock<MetricsLibrary>>(new (std::nothrow) Mock<MetricsLibrary>(metricContext));
+    mockMetricsLibrary->setMockedApi(&mockMetricsLibraryApi);
+    mockMetricsLibrary->handle = new MockOsLibrary();
+
+    //  Mock metric enumeration.
+    mockMetricEnumeration = std::unique_ptr<Mock<MetricEnumeration>>(new (std::nothrow) Mock<MetricEnumeration>(metricContext));
+    mockMetricEnumeration->setMockedApi(&mockMetricsDiscoveryApi);
+    mockMetricEnumeration->hMetricsDiscovery = std::make_unique<MockOsLibrary>();
+
+    auto &deviceImp = *static_cast<DeviceImp *>(devices[0]);
+    const uint32_t subDeviceCount = static_cast<uint32_t>(deviceImp.subDevices.size());
+    mockMetricEnumerationSubDevices.resize(subDeviceCount);
+    mockMetricsLibrarySubDevices.resize(subDeviceCount);
+
+    for (uint32_t i = 0; i < subDeviceCount; i++) {
+        auto &metricsSubDeviceContext = deviceImp.subDevices[i]->getMetricContext();
+        mockMetricEnumerationSubDevices[i] = std::unique_ptr<Mock<MetricEnumeration>>(new (std::nothrow) Mock<MetricEnumeration>(metricsSubDeviceContext));
+        mockMetricEnumerationSubDevices[i]->setMockedApi(&mockMetricsDiscoveryApi);
+        mockMetricEnumerationSubDevices[i]->hMetricsDiscovery = std::make_unique<MockOsLibrary>();
+
+        mockMetricsLibrarySubDevices[i] = std::unique_ptr<Mock<MetricsLibrary>>(new (std::nothrow) Mock<MetricsLibrary>(metricsSubDeviceContext));
+        mockMetricsLibrarySubDevices[i]->setMockedApi(&mockMetricsLibraryApi);
+        mockMetricsLibrarySubDevices[i]->handle = new MockOsLibrary();
+    }
+    // Metrics Discovery device common settings.
+    metricsDeviceParams.Version.MajorNumber = MetricEnumeration::requiredMetricsDiscoveryMajorVersion;
+    metricsDeviceParams.Version.MinorNumber = MetricEnumeration::requiredMetricsDiscoveryMinorVersion;
+}
+
+void MetricMultiDeviceFixture::TearDown() {
+
+    auto &deviceImp = *static_cast<DeviceImp *>(devices[0]);
+    const uint32_t subDeviceCount = static_cast<uint32_t>(deviceImp.subDevices.size());
+
+    for (uint32_t i = 0; i < subDeviceCount; i++) {
+
+        mockMetricEnumerationSubDevices[i]->setMockedApi(nullptr);
+        mockMetricEnumerationSubDevices[i].reset();
+
+        delete mockMetricsLibrarySubDevices[i]->handle;
+        mockMetricsLibrarySubDevices[i]->setMockedApi(nullptr);
+        mockMetricsLibrarySubDevices[i].reset();
+    }
+
+    mockMetricEnumerationSubDevices.clear();
+    mockMetricsLibrarySubDevices.clear();
+
+    // Restore original metrics library
+    delete mockMetricsLibrary->handle;
+    mockMetricsLibrary->setMockedApi(nullptr);
+    mockMetricsLibrary.reset();
+
+    // Restore original metric enumeration.
+    mockMetricEnumeration->setMockedApi(nullptr);
+    mockMetricEnumeration.reset();
+
+    MultiDeviceFixture::TearDown();
+}
+
+void MetricMultiDeviceFixture::openMetricsAdapter() {
+
+    EXPECT_CALL(*mockMetricEnumeration, loadMetricsDiscovery())
+        .Times(0);
+
+    EXPECT_CALL(*mockMetricEnumeration->g_mockApi, MockOpenAdapterGroup(_))
+        .Times(1)
+        .WillOnce(DoAll(::testing::SetArgPointee<0>(&adapterGroup), Return(TCompletionCode::CC_OK)));
+
+    EXPECT_CALL(adapter, OpenMetricsSubDevice(_, _))
+        .Times(2)
+        .WillRepeatedly(DoAll(::testing::SetArgPointee<1>(&metricsDevice), Return(TCompletionCode::CC_OK)));
+
+    EXPECT_CALL(adapter, CloseMetricsDevice(_))
+        .Times(2)
+        .WillRepeatedly(Return(TCompletionCode::CC_OK));
+
+    EXPECT_CALL(adapterGroup, GetAdapter(_))
+        .Times(0);
+
+    EXPECT_CALL(*mockMetricEnumeration, getMetricsAdapter())
+        .Times(1)
+        .WillOnce(Return(&adapter));
+
+    EXPECT_CALL(adapterGroup, Close())
+        .Times(1)
+        .WillOnce(Return(TCompletionCode::CC_OK));
+}
+
+void MetricMultiDeviceFixture::openMetricsAdapterSubDevice(uint32_t subDeviceIndex) {
+
+    EXPECT_CALL(*mockMetricEnumerationSubDevices[subDeviceIndex], loadMetricsDiscovery())
+        .Times(0);
+
+    EXPECT_CALL(*mockMetricEnumerationSubDevices[subDeviceIndex]->g_mockApi, MockOpenAdapterGroup(_))
+        .Times(1)
+        .WillOnce(DoAll(::testing::SetArgPointee<0>(&adapterGroup), Return(TCompletionCode::CC_OK)));
+
+    EXPECT_CALL(adapter, OpenMetricsDevice(_))
+        .Times(1)
+        .WillOnce(DoAll(::testing::SetArgPointee<0>(&metricsDevice), Return(TCompletionCode::CC_OK)));
+
+    EXPECT_CALL(adapter, CloseMetricsDevice(_))
+        .Times(1)
+        .WillRepeatedly(Return(TCompletionCode::CC_OK));
+
+    EXPECT_CALL(adapterGroup, GetAdapter(_))
+        .Times(0);
+
+    EXPECT_CALL(*mockMetricEnumerationSubDevices[subDeviceIndex], getMetricsAdapter())
+        .Times(1)
+        .WillOnce(Return(&adapter));
+
+    EXPECT_CALL(adapterGroup, Close())
+        .Times(1)
+        .WillOnce(Return(TCompletionCode::CC_OK));
+}
+
+void MetricMultiDeviceFixture::openMetricsAdapterGroup() {
+
+    EXPECT_CALL(*mockMetricEnumeration, loadMetricsDiscovery())
+        .Times(0);
+
+    EXPECT_CALL(*mockMetricEnumeration->g_mockApi, MockOpenAdapterGroup(_))
+        .Times(1)
+        .WillOnce(DoAll(::testing::SetArgPointee<0>(&adapterGroup), Return(TCompletionCode::CC_OK)));
+
+    EXPECT_CALL(adapter, OpenMetricsDevice(_))
+        .Times(1)
+        .WillOnce(DoAll(::testing::SetArgPointee<0>(&metricsDevice), Return(TCompletionCode::CC_OK)));
+
+    EXPECT_CALL(adapter, CloseMetricsDevice(_))
+        .Times(1)
+        .WillOnce(Return(TCompletionCode::CC_OK));
+
+    EXPECT_CALL(adapterGroup, Close())
+        .Times(1)
+        .WillOnce(Return(TCompletionCode::CC_OK));
+}
+
+void MetricStreamerMultiDeviceFixture::cleanup(zet_device_handle_t &hDevice, zet_metric_streamer_handle_t &hStreamer) {
+
+    OaMetricStreamerImp *pStreamerImp = static_cast<OaMetricStreamerImp *>(MetricStreamer::fromHandle(hStreamer));
+    auto &deviceImp = *static_cast<DeviceImp *>(devices[0]);
+
+    for (size_t index = 0; index < deviceImp.subDevices.size(); index++) {
+        zet_metric_streamer_handle_t metricStreamerSubDeviceHandle = pStreamerImp->getMetricStreamers()[index];
+        OaMetricStreamerImp *pStreamerSubDevImp = static_cast<OaMetricStreamerImp *>(MetricStreamer::fromHandle(metricStreamerSubDeviceHandle));
+        auto device = deviceImp.subDevices[index];
+        auto &metricContext = device->getMetricContext();
+        auto &metricsLibrary = metricContext.getMetricsLibrary();
+        metricContext.setMetricStreamer(nullptr);
+        metricsLibrary.release();
+        delete pStreamerSubDevImp;
+    }
+    auto &metricContext = devices[0]->getMetricContext();
+    metricContext.setMetricStreamer(nullptr);
+    delete pStreamerImp;
 }
 
 Mock<MetricsLibrary>::Mock(::L0::MetricContext &metricContext) : MetricsLibrary(metricContext) {
@@ -159,58 +392,11 @@ StatusCode MockMetricsLibraryApi::ConfigurationDeactivate(const ConfigurationHan
 }
 
 StatusCode MockMetricsLibraryApi::ConfigurationDelete(const ConfigurationHandle_1_0 handle) {
-    return Mock<MetricsLibrary>::g_mockApi->MockConfigurationDeactivate(handle);
+    return Mock<MetricsLibrary>::g_mockApi->MockConfigurationDelete(handle);
 }
 
 StatusCode MockMetricsLibraryApi::GetData(GetReportData_1_0 *data) {
     return Mock<MetricsLibrary>::g_mockApi->MockGetData(data);
-}
-
-Mock<MetricEnumeration>::Mock(::L0::MetricContext &metricContext) : MetricEnumeration(metricContext) {
-}
-
-Mock<MetricEnumeration>::~Mock() {
-}
-
-MockMetricsDiscoveryApi *Mock<MetricEnumeration>::g_mockApi = nullptr;
-
-TCompletionCode MockMetricsDiscoveryApi::OpenMetricsDevice(IMetricsDevice_1_5 **device) {
-    return Mock<MetricEnumeration>::g_mockApi->MockOpenMetricsDevice(device);
-}
-
-TCompletionCode MockMetricsDiscoveryApi::OpenMetricsDeviceFromFile(const char *fileName, void *openParams, IMetricsDevice_1_5 **device) {
-    return Mock<MetricEnumeration>::g_mockApi->MockOpenMetricsDeviceFromFile(fileName, openParams, device);
-}
-
-TCompletionCode MockMetricsDiscoveryApi::CloseMetricsDevice(IMetricsDevice_1_5 *device) {
-    return Mock<MetricEnumeration>::g_mockApi->MockCloseMetricsDevice(device);
-}
-
-TCompletionCode MockMetricsDiscoveryApi::SaveMetricsDeviceToFile(const char *fileName, void *saveParams, IMetricsDevice_1_5 *device) {
-    return Mock<MetricEnumeration>::g_mockApi->MockSaveMetricsDeviceToFile(fileName, saveParams, device);
-}
-
-void Mock<MetricEnumeration>::setMockedApi(MockMetricsDiscoveryApi *mockedApi) {
-
-    if (mockedApi) {
-
-        //  Mock class used to communicate with metrics library.
-        metricEnumeration = &metricContext.getMetricEnumeration();
-        metricContext.setMetricEnumeration(*this);
-
-        // Mock metrics library api functions.
-        openMetricsDevice = mockedApi->OpenMetricsDevice;
-        closeMetricsDevice = mockedApi->CloseMetricsDevice;
-        openMetricsDeviceFromFile = mockedApi->OpenMetricsDeviceFromFile;
-
-        // Mock metrics library api.
-        Mock<MetricEnumeration>::g_mockApi = mockedApi;
-
-    } else {
-
-        // Restore an original class used to communicate with metrics library.
-        metricContext.setMetricEnumeration(*metricEnumeration);
-    }
 }
 
 Mock<MetricQuery>::Mock() {}
@@ -223,206 +409,3 @@ Mock<MetricQueryPool>::~Mock() {}
 
 } // namespace ult
 } // namespace L0
-
-namespace MetricsDiscovery {
-
-IMetricsDevice_1_0::~IMetricsDevice_1_0() {}
-
-TMetricsDeviceParams_1_0 *IMetricsDevice_1_0::GetParams(void) {
-    UNRECOVERABLE_IF(true);
-    return nullptr;
-}
-
-IConcurrentGroup_1_0 *IMetricsDevice_1_0::GetConcurrentGroup(uint32_t) {
-    UNRECOVERABLE_IF(true);
-    return nullptr;
-}
-
-TGlobalSymbol_1_0 *IMetricsDevice_1_0::GetGlobalSymbol(uint32_t) {
-    UNRECOVERABLE_IF(true);
-    return nullptr;
-}
-
-TTypedValue_1_0 *IMetricsDevice_1_0::GetGlobalSymbolValueByName(const char *name) {
-    UNRECOVERABLE_IF(true);
-    return nullptr;
-}
-
-TCompletionCode IMetricsDevice_1_0::GetLastError(void) {
-    UNRECOVERABLE_IF(true);
-    return TCompletionCode::CC_ERROR_NOT_SUPPORTED;
-}
-
-TCompletionCode IMetricsDevice_1_0::GetGpuCpuTimestamps(uint64_t *, uint64_t *,
-                                                        uint32_t *) {
-    UNRECOVERABLE_IF(true);
-    return TCompletionCode::CC_ERROR_NOT_SUPPORTED;
-}
-
-IConcurrentGroup_1_1 *IMetricsDevice_1_1::GetConcurrentGroup(uint32_t) {
-    UNRECOVERABLE_IF(true);
-    return nullptr;
-}
-
-TMetricsDeviceParams_1_2 *MetricsDiscovery::IMetricsDevice_1_2::GetParams(void) {
-    UNRECOVERABLE_IF(true);
-    return nullptr;
-}
-
-IOverride_1_2 *IMetricsDevice_1_2::GetOverride(unsigned int) {
-    UNRECOVERABLE_IF(true);
-    return nullptr;
-}
-
-IOverride_1_2 *IMetricsDevice_1_2::GetOverrideByName(char const *) {
-    UNRECOVERABLE_IF(true);
-    return nullptr;
-}
-
-IConcurrentGroup_1_5 *IMetricsDevice_1_5::GetConcurrentGroup(uint32_t) {
-    UNRECOVERABLE_IF(true);
-    return nullptr;
-}
-
-IConcurrentGroup_1_0::~IConcurrentGroup_1_0() {}
-
-TConcurrentGroupParams_1_0 *IConcurrentGroup_1_0::GetParams(void) {
-    UNRECOVERABLE_IF(true);
-    return nullptr;
-}
-
-IMetricSet_1_0 *IConcurrentGroup_1_0::GetMetricSet(uint32_t index) {
-    UNRECOVERABLE_IF(true);
-    return nullptr;
-}
-
-TCompletionCode IConcurrentGroup_1_0::OpenIoStream(IMetricSet_1_0 *metricSet, uint32_t processId, uint32_t *nsTimerPeriod, uint32_t *oaBufferSize) {
-    UNRECOVERABLE_IF(true);
-    return CC_ERROR_NOT_SUPPORTED;
-}
-
-TCompletionCode IConcurrentGroup_1_0::ReadIoStream(uint32_t *reportsCount, char *reportData, uint32_t readFlags) {
-    UNRECOVERABLE_IF(true);
-    return CC_ERROR_NOT_SUPPORTED;
-}
-
-TCompletionCode IConcurrentGroup_1_0::CloseIoStream(void) {
-    UNRECOVERABLE_IF(true);
-    return CC_ERROR_NOT_SUPPORTED;
-}
-
-TCompletionCode IConcurrentGroup_1_0::WaitForReports(uint32_t milliseconds) {
-    UNRECOVERABLE_IF(true);
-    return CC_ERROR_NOT_SUPPORTED;
-}
-
-IInformation_1_0 *IConcurrentGroup_1_0::GetIoMeasurementInformation(uint32_t index) {
-    UNRECOVERABLE_IF(true);
-    return nullptr;
-}
-
-IInformation_1_0 *IConcurrentGroup_1_0::GetIoGpuContextInformation(uint32_t index) {
-    UNRECOVERABLE_IF(true);
-    return nullptr;
-}
-
-IMetricSet_1_1 *IConcurrentGroup_1_1::GetMetricSet(uint32_t index) {
-    UNRECOVERABLE_IF(true);
-    return nullptr;
-}
-
-TCompletionCode IConcurrentGroup_1_3::SetIoStreamSamplingType(TSamplingType type) {
-    UNRECOVERABLE_IF(true);
-    return CC_ERROR_NOT_SUPPORTED;
-}
-
-IMetricSet_1_5 *IConcurrentGroup_1_5::GetMetricSet(uint32_t index) {
-    UNRECOVERABLE_IF(true);
-    return nullptr;
-}
-
-IMetricSet_1_0::~IMetricSet_1_0() {}
-
-TMetricSetParams_1_0 *IMetricSet_1_0::GetParams(void) {
-    UNRECOVERABLE_IF(true);
-    return nullptr;
-}
-
-IMetric_1_0 *IMetricSet_1_0::GetMetric(uint32_t index) {
-    UNRECOVERABLE_IF(true);
-    return nullptr;
-}
-
-IInformation_1_0 *IMetricSet_1_0::GetInformation(uint32_t index) {
-    UNRECOVERABLE_IF(true);
-    return nullptr;
-}
-
-IMetricSet_1_0 *IMetricSet_1_0::GetComplementaryMetricSet(uint32_t index) {
-    UNRECOVERABLE_IF(true);
-    return nullptr;
-}
-
-TCompletionCode IMetricSet_1_0::Activate(void) {
-    UNRECOVERABLE_IF(true);
-    return CC_ERROR_NOT_SUPPORTED;
-}
-
-TCompletionCode IMetricSet_1_0::Deactivate(void) {
-    UNRECOVERABLE_IF(true);
-    return CC_ERROR_NOT_SUPPORTED;
-}
-
-IMetric_1_0 *IMetricSet_1_0::AddCustomMetric(
-    const char *symbolName, const char *shortName, const char *groupName, const char *longName, const char *dxToOglAlias,
-    uint32_t usageFlagsMask, uint32_t apiMask, TMetricResultType resultType, const char *resultUnits, TMetricType metricType,
-    int64_t loWatermark, int64_t hiWatermark, THwUnitType hwType, const char *ioReadEquation, const char *deltaFunction,
-    const char *queryReadEquation, const char *normalizationEquation, const char *maxValueEquation, const char *signalName) {
-    UNRECOVERABLE_IF(true);
-    return nullptr;
-}
-
-IMetricSet_1_1 ::~IMetricSet_1_1() {}
-
-TCompletionCode IMetricSet_1_1::SetApiFiltering(uint32_t apiMask) {
-    UNRECOVERABLE_IF(true);
-    return CC_ERROR_NOT_SUPPORTED;
-}
-
-TCompletionCode IMetricSet_1_1::CalculateMetrics(const unsigned char *rawData, uint32_t rawDataSize, TTypedValue_1_0 *out,
-                                                 uint32_t outSize, uint32_t *outReportCount, bool enableContextFiltering) {
-    UNRECOVERABLE_IF(true);
-    return CC_ERROR_NOT_SUPPORTED;
-}
-
-TCompletionCode IMetricSet_1_1::CalculateIoMeasurementInformation(TTypedValue_1_0 *out, uint32_t outSize) {
-    UNRECOVERABLE_IF(true);
-    return CC_ERROR_NOT_SUPPORTED;
-}
-
-IMetricSet_1_4 ::~IMetricSet_1_4() {}
-
-TMetricSetParams_1_4 *IMetricSet_1_4::GetParams(void) {
-    UNRECOVERABLE_IF(true);
-    return nullptr;
-}
-
-IMetricSet_1_5 *IMetricSet_1_5::GetComplementaryMetricSet(uint32_t index) {
-    UNRECOVERABLE_IF(true);
-    return nullptr;
-}
-
-TCompletionCode IMetricSet_1_5::CalculateMetrics(const unsigned char *rawData, uint32_t rawDataSize, TTypedValue_1_0 *out,
-                                                 uint32_t outSize, uint32_t *outReportCount, TTypedValue_1_0 *outMaxValues, uint32_t outMaxValuesSize) {
-    UNRECOVERABLE_IF(true);
-    return CC_ERROR_NOT_SUPPORTED;
-}
-
-IMetric_1_0 ::~IMetric_1_0() {}
-
-TMetricParams_1_0 *IMetric_1_0::GetParams() {
-    UNRECOVERABLE_IF(true);
-    return nullptr;
-}
-
-} // namespace MetricsDiscovery

@@ -1,12 +1,12 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
  */
 
-#include "opencl/source/os_interface/performance_counters.h"
-#include "test.h"
+#include "shared/source/os_interface/performance_counters.h"
+#include "shared/test/common/test_macros/test.h"
 
 using namespace NEO;
 

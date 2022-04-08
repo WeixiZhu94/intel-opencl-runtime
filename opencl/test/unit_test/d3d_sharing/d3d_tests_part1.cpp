@@ -1,17 +1,17 @@
 /*
- * Copyright (C) 2019-2020 Intel Corporation
+ * Copyright (C) 2019-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
  */
 
+#include "shared/source/memory_manager/os_agnostic_memory_manager.h"
 #include "shared/source/os_interface/driver_info.h"
 #include "shared/source/utilities/arrayref.h"
-#include "shared/test/unit_test/helpers/debug_manager_state_restore.h"
+#include "shared/test/common/helpers/debug_manager_state_restore.h"
 
 #include "opencl/source/api/api.h"
 #include "opencl/source/mem_obj/image.h"
-#include "opencl/source/memory_manager/os_agnostic_memory_manager.h"
 #include "opencl/source/platform/platform.h"
 #include "opencl/source/sharings/d3d/cl_d3d_api.h"
 #include "opencl/source/sharings/d3d/d3d_buffer.h"
@@ -154,6 +154,62 @@ TYPED_TEST_P(D3DTests, givenNV12FormatAndEvenPlaneWhen2dCreatedThenSetPlaneParam
     EXPECT_TRUE(memcmp(expectedFormat, &image->getSurfaceFormatInfo(), sizeof(SurfaceFormatInfo)) == 0);
     EXPECT_EQ(1u, mockGmmResInfo->getOffsetCalled);
     EXPECT_EQ(2u, mockGmmResInfo->arrayIndexPassedToGetOffset);
+}
+
+TYPED_TEST_P(D3DTests, givenSharedObjectFromInvalidContextWhen2dCreatedThenReturnCorrectCode) {
+    this->mockSharingFcns->mockTexture2dDesc.Format = DXGI_FORMAT_NV12;
+    this->mockSharingFcns->mockTexture2dDesc.MiscFlags = D3DResourceFlags::MISC_SHARED;
+    EXPECT_CALL(*this->mockSharingFcns, getTexture2dDesc(_, _))
+        .Times(1)
+        .WillOnce(SetArgPointee<0>(this->mockSharingFcns->mockTexture2dDesc));
+    cl_int retCode = 0;
+    mockMM.get()->verifyValue = false;
+    auto image = std::unique_ptr<Image>(D3DTexture<TypeParam>::create2d(this->context, reinterpret_cast<D3DTexture2d *>(&this->dummyD3DTexture), CL_MEM_READ_WRITE, 4, &retCode));
+    mockMM.get()->verifyValue = true;
+    EXPECT_EQ(nullptr, image.get());
+    EXPECT_EQ(retCode, CL_INVALID_D3D11_RESOURCE_KHR);
+}
+
+TYPED_TEST_P(D3DTests, givenSharedObjectFromInvalidContextAndNTHandleWhen2dCreatedThenReturnCorrectCode) {
+    this->mockSharingFcns->mockTexture2dDesc.Format = DXGI_FORMAT_NV12;
+    this->mockSharingFcns->mockTexture2dDesc.MiscFlags = D3DResourceFlags::MISC_SHARED_NTHANDLE;
+    EXPECT_CALL(*this->mockSharingFcns, getTexture2dDesc(_, _))
+        .Times(1)
+        .WillOnce(SetArgPointee<0>(this->mockSharingFcns->mockTexture2dDesc));
+    cl_int retCode = 0;
+    mockMM.get()->verifyValue = false;
+    auto image = std::unique_ptr<Image>(D3DTexture<TypeParam>::create2d(this->context, reinterpret_cast<D3DTexture2d *>(&this->dummyD3DTexture), CL_MEM_READ_WRITE, 4, &retCode));
+    mockMM.get()->verifyValue = true;
+    EXPECT_EQ(nullptr, image.get());
+    EXPECT_EQ(retCode, CL_INVALID_D3D11_RESOURCE_KHR);
+}
+
+TYPED_TEST_P(D3DTests, givenSharedObjectAndAlocationFailedWhen2dCreatedThenReturnCorrectCode) {
+    this->mockSharingFcns->mockTexture2dDesc.Format = DXGI_FORMAT_NV12;
+    this->mockSharingFcns->mockTexture2dDesc.MiscFlags = D3DResourceFlags::MISC_SHARED;
+    EXPECT_CALL(*this->mockSharingFcns, getTexture2dDesc(_, _))
+        .Times(1)
+        .WillOnce(SetArgPointee<0>(this->mockSharingFcns->mockTexture2dDesc));
+    cl_int retCode = 0;
+    mockMM.get()->failAlloc = true;
+    auto image = std::unique_ptr<Image>(D3DTexture<TypeParam>::create2d(this->context, reinterpret_cast<D3DTexture2d *>(&this->dummyD3DTexture), CL_MEM_READ_WRITE, 4, &retCode));
+    mockMM.get()->failAlloc = false;
+    EXPECT_EQ(nullptr, image.get());
+    EXPECT_EQ(retCode, CL_OUT_OF_HOST_MEMORY);
+}
+
+TYPED_TEST_P(D3DTests, givenSharedObjectAndNTHandleAndAllocationFailedWhen2dCreatedThenReturnCorrectCode) {
+    this->mockSharingFcns->mockTexture2dDesc.Format = DXGI_FORMAT_NV12;
+    this->mockSharingFcns->mockTexture2dDesc.MiscFlags = D3DResourceFlags::MISC_SHARED_NTHANDLE;
+    EXPECT_CALL(*this->mockSharingFcns, getTexture2dDesc(_, _))
+        .Times(1)
+        .WillOnce(SetArgPointee<0>(this->mockSharingFcns->mockTexture2dDesc));
+    cl_int retCode = 0;
+    mockMM.get()->failAlloc = true;
+    auto image = std::unique_ptr<Image>(D3DTexture<TypeParam>::create2d(this->context, reinterpret_cast<D3DTexture2d *>(&this->dummyD3DTexture), CL_MEM_READ_WRITE, 4, &retCode));
+    mockMM.get()->failAlloc = false;
+    EXPECT_EQ(nullptr, image.get());
+    EXPECT_EQ(retCode, CL_OUT_OF_HOST_MEMORY);
 }
 
 TYPED_TEST_P(D3DTests, givenNV12FormatAndOddPlaneWhen2dCreatedThenSetPlaneParams) {
@@ -624,6 +680,26 @@ TYPED_TEST_P(D3DTests, givenInvalidSubresourceWhenCreateTexture3dIsCalledThenFai
     EXPECT_EQ(CL_INVALID_VALUE, retVal);
 }
 
+TYPED_TEST_P(D3DTests, givenPackedFormatWhenLookingForSurfaceFormatWithPackedNotSupportedThenReturnNull) {
+    EXPECT_GT(SurfaceFormats::packed().size(), 0u);
+    for (auto &format : SurfaceFormats::packed()) {
+        auto surfaceFormat = D3DSharing<TypeParam>::findSurfaceFormatInfo(format.surfaceFormat.GMMSurfaceFormat, CL_MEM_READ_ONLY, false /* supportsOcl20Features */, false /* packedSupported */);
+        ASSERT_EQ(nullptr, surfaceFormat);
+    }
+}
+
+TYPED_TEST_P(D3DTests, givenPackedFormatWhenLookingForSurfaceFormatWithPackedSupportedThenReturnValidFormat) {
+    EXPECT_GT(SurfaceFormats::packed().size(), 0u);
+    uint32_t counter = 0;
+    for (auto &format : SurfaceFormats::packed()) {
+        auto surfaceFormat = D3DSharing<TypeParam>::findSurfaceFormatInfo(format.surfaceFormat.GMMSurfaceFormat, CL_MEM_READ_ONLY, false /* supportsOcl20Features */, true /* packedSupported */);
+        ASSERT_NE(nullptr, surfaceFormat);
+        counter++;
+        EXPECT_EQ(&format, surfaceFormat);
+    }
+    EXPECT_NE(counter, 0U);
+}
+
 TYPED_TEST_P(D3DTests, givenReadonlyFormatWhenLookingForSurfaceFormatThenReturnValidFormat) {
     EXPECT_GT(SurfaceFormats::readOnly12().size(), 0u);
     for (auto &format : SurfaceFormats::readOnly12()) {
@@ -632,7 +708,7 @@ TYPED_TEST_P(D3DTests, givenReadonlyFormatWhenLookingForSurfaceFormatThenReturnV
             format.OCLImageFormat.image_channel_order == CL_BGRA ||
             format.OCLImageFormat.image_channel_order == CL_RG ||
             format.OCLImageFormat.image_channel_order == CL_R) {
-            auto surfaceFormat = D3DSharing<TypeParam>::findSurfaceFormatInfo(format.surfaceFormat.GMMSurfaceFormat, CL_MEM_READ_ONLY, false /* supportsOcl20Features */);
+            auto surfaceFormat = D3DSharing<TypeParam>::findSurfaceFormatInfo(format.surfaceFormat.GMMSurfaceFormat, CL_MEM_READ_ONLY, false /* supportsOcl20Features */, true);
             ASSERT_NE(nullptr, surfaceFormat);
             EXPECT_EQ(&format, surfaceFormat);
         }
@@ -647,7 +723,7 @@ TYPED_TEST_P(D3DTests, givenWriteOnlyFormatWhenLookingForSurfaceFormatThenReturn
             format.OCLImageFormat.image_channel_order == CL_BGRA ||
             format.OCLImageFormat.image_channel_order == CL_RG ||
             format.OCLImageFormat.image_channel_order == CL_R) {
-            auto surfaceFormat = D3DSharing<TypeParam>::findSurfaceFormatInfo(format.surfaceFormat.GMMSurfaceFormat, CL_MEM_WRITE_ONLY, context->getDevice(0)->getHardwareInfo().capabilityTable.supportsOcl21Features);
+            auto surfaceFormat = D3DSharing<TypeParam>::findSurfaceFormatInfo(format.surfaceFormat.GMMSurfaceFormat, CL_MEM_WRITE_ONLY, context->getDevice(0)->getHardwareInfo().capabilityTable.supportsOcl21Features, true);
             ASSERT_NE(nullptr, surfaceFormat);
             EXPECT_EQ(&format, surfaceFormat);
         }
@@ -662,7 +738,7 @@ TYPED_TEST_P(D3DTests, givenReadWriteFormatWhenLookingForSurfaceFormatThenReturn
             format.OCLImageFormat.image_channel_order == CL_BGRA ||
             format.OCLImageFormat.image_channel_order == CL_RG ||
             format.OCLImageFormat.image_channel_order == CL_R) {
-            auto surfaceFormat = D3DSharing<TypeParam>::findSurfaceFormatInfo(format.surfaceFormat.GMMSurfaceFormat, CL_MEM_READ_WRITE, context->getDevice(0)->getHardwareInfo().capabilityTable.supportsOcl21Features);
+            auto surfaceFormat = D3DSharing<TypeParam>::findSurfaceFormatInfo(format.surfaceFormat.GMMSurfaceFormat, CL_MEM_READ_WRITE, context->getDevice(0)->getHardwareInfo().capabilityTable.supportsOcl21Features, true);
             ASSERT_NE(nullptr, surfaceFormat);
             EXPECT_EQ(&format, surfaceFormat);
         }
@@ -692,11 +768,17 @@ REGISTER_TYPED_TEST_CASE_P(D3DTests,
                            givenWriteOnlyFormatWhenLookingForSurfaceFormatThenReturnValidFormat,
                            givenReadWriteFormatWhenLookingForSurfaceFormatThenReturnValidFormat,
                            givenNV12FormatAndEvenPlaneWhen2dCreatedThenSetPlaneParams,
+                           givenSharedObjectFromInvalidContextWhen2dCreatedThenReturnCorrectCode,
+                           givenSharedObjectFromInvalidContextAndNTHandleWhen2dCreatedThenReturnCorrectCode,
+                           givenSharedObjectAndAlocationFailedWhen2dCreatedThenReturnCorrectCode,
+                           givenSharedObjectAndNTHandleAndAllocationFailedWhen2dCreatedThenReturnCorrectCode,
                            givenP010FormatAndEvenPlaneWhen2dCreatedThenSetPlaneParams,
                            givenP016FormatAndEvenPlaneWhen2dCreatedThenSetPlaneParams,
                            givenNV12FormatAndOddPlaneWhen2dCreatedThenSetPlaneParams,
                            givenP010FormatAndOddPlaneWhen2dCreatedThenSetPlaneParams,
-                           givenP016FormatAndOddPlaneWhen2dCreatedThenSetPlaneParams);
+                           givenP016FormatAndOddPlaneWhen2dCreatedThenSetPlaneParams,
+                           givenPackedFormatWhenLookingForSurfaceFormatWithPackedNotSupportedThenReturnNull,
+                           givenPackedFormatWhenLookingForSurfaceFormatWithPackedSupportedThenReturnValidFormat);
 
 INSTANTIATE_TYPED_TEST_CASE_P(D3DSharingTests, D3DTests, D3DTypes);
 

@@ -1,28 +1,20 @@
 /*
- * Copyright (C) 2020 Intel Corporation
+ * Copyright (C) 2020-2022 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
  */
 
 #include "shared/source/gmm_helper/gmm_helper.h"
-#include "shared/source/helpers/hw_info.h"
-#include "shared/source/helpers/register_offsets.h"
-#include "shared/test/unit_test/cmd_parse/gen_cmd_parse.h"
+#include "shared/test/common/cmd_parse/gen_cmd_parse.h"
+#include "shared/test/common/helpers/unit_test_helper.h"
+#include "shared/test/common/mocks/mock_memory_manager.h"
+#include "shared/test/common/test_macros/test.h"
+#include "shared/test/unit_test/page_fault_manager/mock_cpu_page_fault_manager.h"
 
-#include "opencl/test/unit_test/mocks/mock_graphics_allocation.h"
-#include "test.h"
-
-#include "level_zero/core/source/builtin/builtin_functions_lib_impl.h"
-#include "level_zero/core/source/context/context.h"
-#include "level_zero/core/source/driver/driver_handle_imp.h"
-#include "level_zero/core/source/image/image_hw.h"
-#include "level_zero/core/source/kernel/kernel_imp.h"
-#include "level_zero/core/source/module/module.h"
+#include "level_zero/core/source/cmdqueue/cmdqueue_imp.h"
 #include "level_zero/core/test/unit_tests/fixtures/device_fixture.h"
 #include "level_zero/core/test/unit_tests/mocks/mock_cmdlist.h"
-#include "level_zero/core/test/unit_tests/mocks/mock_event.h"
-#include "level_zero/core/test/unit_tests/mocks/mock_kernel.h"
 
 namespace L0 {
 namespace ult {
@@ -53,21 +45,30 @@ TEST_F(ContextCommandListCreate, whenCreatingCommandListImmediateFromContextThen
 
 using CommandListCreate = Test<DeviceFixture>;
 
-TEST(zeCommandListCreateImmediate, redirectsToObject) {
-    Mock<Device> device;
-    ze_command_queue_desc_t desc = {};
-    ze_command_list_handle_t commandList = {};
+TEST_F(CommandListCreate, whenCommandListIsCreatedWithInvalidProductFamilyThenFailureIsReturned) {
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::create(PRODUCT_FAMILY::IGFX_MAX_PRODUCT, device, NEO::EngineGroupType::RenderCompute, 0u, returnValue));
+    EXPECT_EQ(ZE_RESULT_ERROR_UNINITIALIZED, returnValue);
+    ASSERT_EQ(nullptr, commandList);
+}
 
-    EXPECT_CALL(device, createCommandListImmediate(&desc, &commandList))
-        .Times(1)
-        .WillRepeatedly(::testing::Return(ZE_RESULT_SUCCESS));
-
-    auto result = zeCommandListCreateImmediate(device.toHandle(), &desc, &commandList);
-    EXPECT_EQ(ZE_RESULT_SUCCESS, result);
+TEST_F(CommandListCreate, whenCommandListImmediateIsCreatedWithInvalidProductFamilyThenFailureIsReturned) {
+    ze_result_t returnValue;
+    const ze_command_queue_desc_t desc = {};
+    bool internalEngine = true;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::createImmediate(PRODUCT_FAMILY::IGFX_MAX_PRODUCT,
+                                                                              device,
+                                                                              &desc,
+                                                                              internalEngine,
+                                                                              NEO::EngineGroupType::RenderCompute,
+                                                                              returnValue));
+    EXPECT_EQ(ZE_RESULT_ERROR_UNINITIALIZED, returnValue);
+    ASSERT_EQ(nullptr, commandList);
 }
 
 TEST_F(CommandListCreate, whenCommandListIsCreatedThenItIsInitialized) {
-    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, false));
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, NEO::EngineGroupType::RenderCompute, 0u, returnValue));
     ASSERT_NE(nullptr, commandList);
 
     EXPECT_EQ(device, commandList->device);
@@ -92,7 +93,8 @@ TEST_F(CommandListCreate, whenCommandListIsCreatedThenItIsInitialized) {
 }
 
 TEST_F(CommandListCreate, givenRegularCommandListThenDefaultNumIddPerBlockIsUsed) {
-    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, false));
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, NEO::EngineGroupType::RenderCompute, 0u, returnValue));
     ASSERT_NE(nullptr, commandList);
 
     const uint32_t defaultNumIdds = CommandList::defaultNumIddsPerBlock;
@@ -100,39 +102,618 @@ TEST_F(CommandListCreate, givenRegularCommandListThenDefaultNumIddPerBlockIsUsed
 }
 
 TEST_F(CommandListCreate, givenNonExistingPtrThenAppendMemAdviseReturnsError) {
-    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, false));
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, NEO::EngineGroupType::RenderCompute, 0u, returnValue));
     ASSERT_NE(nullptr, commandList);
 
     auto res = commandList->appendMemAdvise(device, nullptr, 0, ZE_MEMORY_ADVICE_SET_READ_MOSTLY);
-    EXPECT_EQ(ZE_RESULT_ERROR_UNKNOWN, res);
+    EXPECT_EQ(ZE_RESULT_ERROR_INVALID_ARGUMENT, res);
 }
 
 TEST_F(CommandListCreate, givenNonExistingPtrThenAppendMemoryPrefetchReturnsError) {
-    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, false));
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, NEO::EngineGroupType::RenderCompute, 0u, returnValue));
     ASSERT_NE(nullptr, commandList);
 
     auto res = commandList->appendMemoryPrefetch(nullptr, 0);
-    EXPECT_EQ(ZE_RESULT_ERROR_UNKNOWN, res);
+    EXPECT_EQ(ZE_RESULT_ERROR_INVALID_ARGUMENT, res);
 }
 
-TEST_F(CommandListCreate, givenValidPtrThenAppendMemAdviseReturnsSuccess) {
+TEST_F(CommandListCreate, givenValidPtrWhenAppendMemAdviseFailsThenReturnSuccess) {
     size_t size = 10;
     size_t alignment = 1u;
     void *ptr = nullptr;
 
-    auto res = driverHandle->allocDeviceMem(device->toHandle(),
-                                            ZE_DEVICE_MEM_ALLOC_FLAG_DEFAULT,
-                                            size, alignment, &ptr);
+    ze_device_mem_alloc_desc_t deviceDesc = {};
+    auto res = context->allocDeviceMem(device->toHandle(),
+                                       &deviceDesc,
+                                       size, alignment, &ptr);
     EXPECT_EQ(ZE_RESULT_SUCCESS, res);
     EXPECT_NE(nullptr, ptr);
 
-    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, false));
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, NEO::EngineGroupType::RenderCompute, 0u, returnValue));
+    ASSERT_NE(nullptr, commandList);
+
+    auto memoryManager = static_cast<MockMemoryManager *>(device->getDriverHandle()->getMemoryManager());
+    memoryManager->failSetMemAdvise = true;
+
+    res = commandList->appendMemAdvise(device, ptr, size, ZE_MEMORY_ADVICE_SET_PREFERRED_LOCATION);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+
+    res = context->freeMem(ptr);
+    ASSERT_EQ(res, ZE_RESULT_SUCCESS);
+}
+
+TEST_F(CommandListCreate, givenValidPtrWhenAppendMemAdviseSucceedsThenReturnSuccess) {
+    size_t size = 10;
+    size_t alignment = 1u;
+    void *ptr = nullptr;
+
+    ze_device_mem_alloc_desc_t deviceDesc = {};
+    auto res = context->allocDeviceMem(device->toHandle(),
+                                       &deviceDesc,
+                                       size, alignment, &ptr);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    EXPECT_NE(nullptr, ptr);
+
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, NEO::EngineGroupType::RenderCompute, 0u, returnValue));
     ASSERT_NE(nullptr, commandList);
 
     res = commandList->appendMemAdvise(device, ptr, size, ZE_MEMORY_ADVICE_SET_READ_MOSTLY);
     EXPECT_EQ(ZE_RESULT_SUCCESS, res);
 
-    res = driverHandle->freeMem(ptr);
+    res = context->freeMem(ptr);
+    ASSERT_EQ(res, ZE_RESULT_SUCCESS);
+}
+
+TEST_F(CommandListCreate, givenValidPtrThenAppendMemAdviseSetWithMaxHintThenSuccessReturned) {
+    size_t size = 10;
+    size_t alignment = 1u;
+    void *ptr = nullptr;
+
+    ze_device_mem_alloc_desc_t deviceDesc = {};
+    auto res = context->allocDeviceMem(device->toHandle(),
+                                       &deviceDesc,
+                                       size, alignment, &ptr);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    EXPECT_NE(nullptr, ptr);
+
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, NEO::EngineGroupType::RenderCompute, 0u, returnValue));
+    ASSERT_NE(nullptr, commandList);
+
+    res = commandList->appendMemAdvise(device, ptr, size, ZE_MEMORY_ADVICE_FORCE_UINT32);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+
+    res = context->freeMem(ptr);
+    ASSERT_EQ(res, ZE_RESULT_SUCCESS);
+}
+
+TEST_F(CommandListCreate, givenValidPtrThenAppendMemAdviseSetAndClearReadMostlyThenMemAdviseReadOnlySet) {
+    size_t size = 10;
+    size_t alignment = 1u;
+    void *ptr = nullptr;
+
+    ze_device_mem_alloc_desc_t deviceDesc = {};
+    auto res = context->allocDeviceMem(device->toHandle(),
+                                       &deviceDesc,
+                                       size, alignment, &ptr);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    EXPECT_NE(nullptr, ptr);
+
+    ze_result_t returnValue;
+    NEO::MemAdviseFlags flags;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, NEO::EngineGroupType::RenderCompute, 0u, returnValue));
+    ASSERT_NE(nullptr, commandList);
+
+    res = commandList->appendMemAdvise(device, ptr, size, ZE_MEMORY_ADVICE_SET_READ_MOSTLY);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    auto allocData = device->getDriverHandle()->getSvmAllocsManager()->getSVMAlloc(ptr);
+    L0::DeviceImp *deviceImp = static_cast<L0::DeviceImp *>((L0::Device::fromHandle(device)));
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    EXPECT_EQ(1, flags.read_only);
+    res = commandList->appendMemAdvise(device, ptr, size, ZE_MEMORY_ADVICE_CLEAR_READ_MOSTLY);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    EXPECT_EQ(0, flags.read_only);
+
+    res = context->freeMem(ptr);
+    ASSERT_EQ(res, ZE_RESULT_SUCCESS);
+}
+
+TEST_F(CommandListCreate, givenValidPtrThenAppendMemAdviseSetAndClearPreferredLocationThenMemAdvisePreferredDeviceSet) {
+    size_t size = 10;
+    size_t alignment = 1u;
+    void *ptr = nullptr;
+
+    ze_device_mem_alloc_desc_t deviceDesc = {};
+    auto res = context->allocDeviceMem(device->toHandle(),
+                                       &deviceDesc,
+                                       size, alignment, &ptr);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    EXPECT_NE(nullptr, ptr);
+
+    ze_result_t returnValue;
+    NEO::MemAdviseFlags flags;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, NEO::EngineGroupType::RenderCompute, 0u, returnValue));
+    ASSERT_NE(nullptr, commandList);
+
+    res = commandList->appendMemAdvise(device, ptr, size, ZE_MEMORY_ADVICE_SET_PREFERRED_LOCATION);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    auto allocData = device->getDriverHandle()->getSvmAllocsManager()->getSVMAlloc(ptr);
+    L0::DeviceImp *deviceImp = static_cast<L0::DeviceImp *>((L0::Device::fromHandle(device)));
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    EXPECT_EQ(1, flags.device_preferred_location);
+    res = commandList->appendMemAdvise(device, ptr, size, ZE_MEMORY_ADVICE_CLEAR_PREFERRED_LOCATION);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    EXPECT_EQ(0, flags.device_preferred_location);
+
+    res = context->freeMem(ptr);
+    ASSERT_EQ(res, ZE_RESULT_SUCCESS);
+}
+
+TEST_F(CommandListCreate, givenValidPtrThenAppendMemAdviseSetAndClearNonAtomicThenMemAdviseNonAtomicSet) {
+    size_t size = 10;
+    size_t alignment = 1u;
+    void *ptr = nullptr;
+
+    ze_device_mem_alloc_desc_t deviceDesc = {};
+    auto res = context->allocDeviceMem(device->toHandle(),
+                                       &deviceDesc,
+                                       size, alignment, &ptr);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    EXPECT_NE(nullptr, ptr);
+
+    ze_result_t returnValue;
+    NEO::MemAdviseFlags flags;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, NEO::EngineGroupType::RenderCompute, 0u, returnValue));
+    ASSERT_NE(nullptr, commandList);
+
+    res = commandList->appendMemAdvise(device, ptr, size, ZE_MEMORY_ADVICE_SET_NON_ATOMIC_MOSTLY);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    auto allocData = device->getDriverHandle()->getSvmAllocsManager()->getSVMAlloc(ptr);
+    L0::DeviceImp *deviceImp = static_cast<L0::DeviceImp *>((L0::Device::fromHandle(device)));
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    EXPECT_EQ(1, flags.non_atomic);
+    res = commandList->appendMemAdvise(device, ptr, size, ZE_MEMORY_ADVICE_CLEAR_NON_ATOMIC_MOSTLY);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    EXPECT_EQ(0, flags.non_atomic);
+
+    res = context->freeMem(ptr);
+    ASSERT_EQ(res, ZE_RESULT_SUCCESS);
+}
+
+TEST_F(CommandListCreate, givenValidPtrThenAppendMemAdviseSetAndClearCachingThenMemAdviseCachingSet) {
+    size_t size = 10;
+    size_t alignment = 1u;
+    void *ptr = nullptr;
+
+    ze_device_mem_alloc_desc_t deviceDesc = {};
+    auto res = context->allocDeviceMem(device->toHandle(),
+                                       &deviceDesc,
+                                       size, alignment, &ptr);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    EXPECT_NE(nullptr, ptr);
+
+    ze_result_t returnValue;
+    NEO::MemAdviseFlags flags;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, NEO::EngineGroupType::RenderCompute, 0u, returnValue));
+    ASSERT_NE(nullptr, commandList);
+
+    res = commandList->appendMemAdvise(device, ptr, size, ZE_MEMORY_ADVICE_BIAS_CACHED);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    auto allocData = device->getDriverHandle()->getSvmAllocsManager()->getSVMAlloc(ptr);
+    L0::DeviceImp *deviceImp = static_cast<L0::DeviceImp *>((L0::Device::fromHandle(device)));
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    EXPECT_EQ(1, flags.cached_memory);
+    auto memoryManager = static_cast<MockMemoryManager *>(device->getDriverHandle()->getMemoryManager());
+    EXPECT_EQ(1, memoryManager->memAdviseFlags.cached_memory);
+    res = commandList->appendMemAdvise(device, ptr, size, ZE_MEMORY_ADVICE_BIAS_UNCACHED);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    EXPECT_EQ(0, flags.cached_memory);
+    EXPECT_EQ(0, memoryManager->memAdviseFlags.cached_memory);
+
+    res = context->freeMem(ptr);
+    ASSERT_EQ(res, ZE_RESULT_SUCCESS);
+}
+
+using CommandListMemAdvisePageFault = Test<PageFaultDeviceFixture>;
+
+TEST_F(CommandListMemAdvisePageFault, givenValidPtrAndPageFaultHandlerThenAppendMemAdviseWithReadOnlyAndDevicePreferredClearsMigrationBlocked) {
+    size_t size = 10;
+    size_t alignment = 1u;
+    void *ptr = nullptr;
+
+    ze_device_mem_alloc_desc_t deviceDesc = {};
+    auto res = context->allocDeviceMem(device->toHandle(),
+                                       &deviceDesc,
+                                       size, alignment, &ptr);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    EXPECT_NE(nullptr, ptr);
+
+    ze_result_t returnValue;
+    NEO::MemAdviseFlags flags;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, NEO::EngineGroupType::RenderCompute, 0u, returnValue));
+    ASSERT_NE(nullptr, commandList);
+
+    L0::DeviceImp *deviceImp = static_cast<L0::DeviceImp *>((L0::Device::fromHandle(device)));
+
+    auto allocData = device->getDriverHandle()->getSvmAllocsManager()->getSVMAlloc(ptr);
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    flags.cpu_migration_blocked = 1;
+    deviceImp->memAdviseSharedAllocations[allocData] = flags;
+
+    res = commandList->appendMemAdvise(device, ptr, size, ZE_MEMORY_ADVICE_SET_READ_MOSTLY);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    EXPECT_EQ(1, flags.read_only);
+
+    res = commandList->appendMemAdvise(device, ptr, size, ZE_MEMORY_ADVICE_SET_PREFERRED_LOCATION);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    EXPECT_EQ(1, flags.device_preferred_location);
+
+    res = commandList->appendMemAdvise(device, ptr, size, ZE_MEMORY_ADVICE_CLEAR_READ_MOSTLY);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+
+    res = commandList->appendMemAdvise(device, ptr, size, ZE_MEMORY_ADVICE_CLEAR_PREFERRED_LOCATION);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    EXPECT_EQ(0, flags.read_only);
+    EXPECT_EQ(0, flags.device_preferred_location);
+    EXPECT_EQ(0, flags.cpu_migration_blocked);
+
+    res = context->freeMem(ptr);
+    ASSERT_EQ(res, ZE_RESULT_SUCCESS);
+}
+
+TEST_F(CommandListMemAdvisePageFault, givenValidPtrAndPageFaultHandlerThenGpuDomainHanlderWithHintsIsSet) {
+    size_t size = 10;
+    size_t alignment = 1u;
+    void *ptr = nullptr;
+
+    ze_device_mem_alloc_desc_t deviceDesc = {};
+    auto res = context->allocDeviceMem(device->toHandle(),
+                                       &deviceDesc,
+                                       size, alignment, &ptr);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    EXPECT_NE(nullptr, ptr);
+
+    ze_result_t returnValue;
+    NEO::MemAdviseFlags flags;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, NEO::EngineGroupType::RenderCompute, 0u, returnValue));
+    ASSERT_NE(nullptr, commandList);
+
+    L0::DeviceImp *deviceImp = static_cast<L0::DeviceImp *>((L0::Device::fromHandle(device)));
+
+    auto allocData = device->getDriverHandle()->getSvmAllocsManager()->getSVMAlloc(ptr);
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    deviceImp->memAdviseSharedAllocations[allocData] = flags;
+
+    res = commandList->appendMemAdvise(device, ptr, size, ZE_MEMORY_ADVICE_SET_READ_MOSTLY);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    EXPECT_EQ(1, flags.read_only);
+
+    res = commandList->appendMemAdvise(device, ptr, size, ZE_MEMORY_ADVICE_SET_PREFERRED_LOCATION);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    EXPECT_EQ(1, flags.device_preferred_location);
+
+    auto handlerWithHints = L0::handleGpuDomainTransferForHwWithHints;
+
+    EXPECT_EQ(handlerWithHints, reinterpret_cast<void *>(mockPageFaultManager->gpuDomainHandler));
+
+    res = context->freeMem(ptr);
+    ASSERT_EQ(res, ZE_RESULT_SUCCESS);
+}
+
+TEST_F(CommandListMemAdvisePageFault, givenValidPtrAndPageFaultHandlerAndGpuDomainHandlerWithHintsSetThenHandlerBlocksCpuMigration) {
+    size_t size = 10;
+    size_t alignment = 1u;
+    void *ptr = nullptr;
+
+    ze_device_mem_alloc_desc_t deviceDesc = {};
+    auto res = context->allocDeviceMem(device->toHandle(),
+                                       &deviceDesc,
+                                       size, alignment, &ptr);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    EXPECT_NE(nullptr, ptr);
+
+    ze_result_t returnValue;
+    NEO::MemAdviseFlags flags;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, NEO::EngineGroupType::RenderCompute, 0u, returnValue));
+    ASSERT_NE(nullptr, commandList);
+
+    L0::DeviceImp *deviceImp = static_cast<L0::DeviceImp *>((L0::Device::fromHandle(device)));
+
+    auto allocData = device->getDriverHandle()->getSvmAllocsManager()->getSVMAlloc(ptr);
+
+    res = commandList->appendMemAdvise(device, ptr, size, ZE_MEMORY_ADVICE_SET_READ_MOSTLY);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    EXPECT_EQ(1, flags.read_only);
+
+    res = commandList->appendMemAdvise(device, ptr, size, ZE_MEMORY_ADVICE_SET_PREFERRED_LOCATION);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    EXPECT_EQ(1, flags.device_preferred_location);
+
+    auto handlerWithHints = L0::handleGpuDomainTransferForHwWithHints;
+
+    EXPECT_EQ(handlerWithHints, reinterpret_cast<void *>(mockPageFaultManager->gpuDomainHandler));
+
+    NEO::PageFaultManager::PageFaultData pageData;
+    pageData.cmdQ = deviceImp;
+    pageData.domain = NEO::PageFaultManager::AllocationDomain::Gpu;
+    mockPageFaultManager->gpuDomainHandler(mockPageFaultManager, ptr, pageData);
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    EXPECT_EQ(1, flags.cpu_migration_blocked);
+
+    res = context->freeMem(ptr);
+    ASSERT_EQ(res, ZE_RESULT_SUCCESS);
+}
+
+TEST_F(CommandListMemAdvisePageFault, givenValidPtrAndPageFaultHandlerAndGpuDomainHandlerWithHintsSetAndOnlyReadOnlyOrDevicePreferredHintThenHandlerAllowsCpuMigration) {
+    size_t size = 10;
+    size_t alignment = 1u;
+    void *ptr = nullptr;
+
+    ze_device_mem_alloc_desc_t deviceDesc = {};
+    auto res = context->allocDeviceMem(device->toHandle(),
+                                       &deviceDesc,
+                                       size, alignment, &ptr);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    EXPECT_NE(nullptr, ptr);
+
+    ze_result_t returnValue;
+    NEO::MemAdviseFlags flags;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, NEO::EngineGroupType::RenderCompute, 0u, returnValue));
+    ASSERT_NE(nullptr, commandList);
+
+    L0::DeviceImp *deviceImp = static_cast<L0::DeviceImp *>((L0::Device::fromHandle(device)));
+
+    auto allocData = device->getDriverHandle()->getSvmAllocsManager()->getSVMAlloc(ptr);
+
+    res = commandList->appendMemAdvise(device, ptr, size, ZE_MEMORY_ADVICE_SET_READ_MOSTLY);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    EXPECT_EQ(1, flags.read_only);
+
+    auto handlerWithHints = L0::handleGpuDomainTransferForHwWithHints;
+
+    EXPECT_EQ(handlerWithHints, reinterpret_cast<void *>(mockPageFaultManager->gpuDomainHandler));
+
+    NEO::PageFaultManager::PageFaultData pageData;
+    pageData.cmdQ = deviceImp;
+    pageData.domain = NEO::PageFaultManager::AllocationDomain::Gpu;
+    mockPageFaultManager->gpuDomainHandler(mockPageFaultManager, ptr, pageData);
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    EXPECT_EQ(0, flags.cpu_migration_blocked);
+
+    res = commandList->appendMemAdvise(device, ptr, size, ZE_MEMORY_ADVICE_CLEAR_READ_MOSTLY);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    EXPECT_EQ(0, flags.read_only);
+
+    res = commandList->appendMemAdvise(device, ptr, size, ZE_MEMORY_ADVICE_SET_PREFERRED_LOCATION);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    EXPECT_EQ(1, flags.device_preferred_location);
+
+    mockPageFaultManager->gpuDomainHandler(mockPageFaultManager, ptr, pageData);
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    EXPECT_EQ(0, flags.cpu_migration_blocked);
+
+    res = commandList->appendMemAdvise(device, ptr, size, ZE_MEMORY_ADVICE_CLEAR_PREFERRED_LOCATION);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    EXPECT_EQ(0, flags.device_preferred_location);
+
+    mockPageFaultManager->gpuDomainHandler(mockPageFaultManager, ptr, pageData);
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    EXPECT_EQ(0, flags.cpu_migration_blocked);
+
+    res = context->freeMem(ptr);
+    ASSERT_EQ(res, ZE_RESULT_SUCCESS);
+}
+
+TEST_F(CommandListMemAdvisePageFault, givenValidPtrAndPageFaultHandlerAndGpuDomainHandlerWithHintsSetAndWithPrintUsmSharedMigrationDebugKeyThenMessageIsPrinted) {
+    DebugManagerStateRestore restorer;
+    DebugManager.flags.PrintUmdSharedMigration.set(1);
+
+    size_t size = 10;
+    size_t alignment = 1u;
+    void *ptr = nullptr;
+
+    ze_device_mem_alloc_desc_t deviceDesc = {};
+    ze_host_mem_alloc_desc_t hostDesc = {};
+    auto res = context->allocSharedMem(device->toHandle(),
+                                       &deviceDesc,
+                                       &hostDesc,
+                                       size, alignment, &ptr);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    EXPECT_NE(nullptr, ptr);
+
+    ze_result_t returnValue;
+    NEO::MemAdviseFlags flags;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, NEO::EngineGroupType::RenderCompute, 0u, returnValue));
+    ASSERT_NE(nullptr, commandList);
+
+    L0::DeviceImp *deviceImp = static_cast<L0::DeviceImp *>((L0::Device::fromHandle(device)));
+
+    auto allocData = device->getDriverHandle()->getSvmAllocsManager()->getSVMAlloc(ptr);
+
+    res = commandList->appendMemAdvise(device, ptr, size, ZE_MEMORY_ADVICE_SET_READ_MOSTLY);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    EXPECT_EQ(1, flags.read_only);
+
+    auto handlerWithHints = L0::handleGpuDomainTransferForHwWithHints;
+
+    EXPECT_EQ(handlerWithHints, reinterpret_cast<void *>(mockPageFaultManager->gpuDomainHandler));
+
+    testing::internal::CaptureStdout(); // start capturing
+
+    NEO::PageFaultManager::PageFaultData pageData;
+    pageData.cmdQ = deviceImp;
+    pageData.domain = NEO::PageFaultManager::AllocationDomain::Gpu;
+    mockPageFaultManager->gpuDomainHandler(mockPageFaultManager, ptr, pageData);
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    EXPECT_EQ(0, flags.cpu_migration_blocked);
+
+    std::string output = testing::internal::GetCapturedStdout(); // stop capturing
+
+    std::string expectedString = "UMD transferring shared allocation";
+    uint32_t occurrences = 0u;
+    uint32_t expectedOccurrences = 1u;
+    size_t idx = output.find(expectedString);
+    while (idx != std::string::npos) {
+        occurrences++;
+        idx = output.find(expectedString, idx + 1);
+    }
+    EXPECT_EQ(expectedOccurrences, occurrences);
+
+    res = context->freeMem(ptr);
+    ASSERT_EQ(res, ZE_RESULT_SUCCESS);
+}
+
+TEST_F(CommandListMemAdvisePageFault, givenValidPtrAndPageFaultHandlerAndGpuDomainHandlerWithHintsSetAndInvalidHintsThenHandlerAllowsCpuMigration) {
+    size_t size = 10;
+    size_t alignment = 1u;
+    void *ptr = nullptr;
+
+    ze_device_mem_alloc_desc_t deviceDesc = {};
+    auto res = context->allocDeviceMem(device->toHandle(),
+                                       &deviceDesc,
+                                       size, alignment, &ptr);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    EXPECT_NE(nullptr, ptr);
+
+    ze_result_t returnValue;
+    NEO::MemAdviseFlags flags;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, NEO::EngineGroupType::RenderCompute, 0u, returnValue));
+    ASSERT_NE(nullptr, commandList);
+
+    L0::DeviceImp *deviceImp = static_cast<L0::DeviceImp *>((L0::Device::fromHandle(device)));
+
+    auto allocData = device->getDriverHandle()->getSvmAllocsManager()->getSVMAlloc(ptr);
+
+    res = commandList->appendMemAdvise(device, ptr, size, ZE_MEMORY_ADVICE_BIAS_CACHED);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    EXPECT_EQ(1, flags.cached_memory);
+
+    auto handlerWithHints = L0::handleGpuDomainTransferForHwWithHints;
+
+    EXPECT_EQ(handlerWithHints, reinterpret_cast<void *>(mockPageFaultManager->gpuDomainHandler));
+
+    NEO::PageFaultManager::PageFaultData pageData;
+    pageData.cmdQ = deviceImp;
+    pageData.domain = NEO::PageFaultManager::AllocationDomain::Gpu;
+    mockPageFaultManager->gpuDomainHandler(mockPageFaultManager, ptr, pageData);
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    EXPECT_EQ(0, flags.cpu_migration_blocked);
+
+    res = context->freeMem(ptr);
+    ASSERT_EQ(res, ZE_RESULT_SUCCESS);
+}
+
+TEST_F(CommandListMemAdvisePageFault, givenValidPtrAndPageFaultHandlerAndGpuDomainHandlerWithHintsSetAndCpuDomainThenHandlerAllowsCpuMigration) {
+    size_t size = 10;
+    size_t alignment = 1u;
+    void *ptr = nullptr;
+
+    ze_device_mem_alloc_desc_t deviceDesc = {};
+    auto res = context->allocDeviceMem(device->toHandle(),
+                                       &deviceDesc,
+                                       size, alignment, &ptr);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    EXPECT_NE(nullptr, ptr);
+
+    ze_result_t returnValue;
+    NEO::MemAdviseFlags flags;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, NEO::EngineGroupType::RenderCompute, 0u, returnValue));
+    ASSERT_NE(nullptr, commandList);
+
+    L0::DeviceImp *deviceImp = static_cast<L0::DeviceImp *>((L0::Device::fromHandle(device)));
+
+    auto allocData = device->getDriverHandle()->getSvmAllocsManager()->getSVMAlloc(ptr);
+
+    res = commandList->appendMemAdvise(device, ptr, size, ZE_MEMORY_ADVICE_SET_READ_MOSTLY);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    EXPECT_EQ(1, flags.read_only);
+
+    res = commandList->appendMemAdvise(device, ptr, size, ZE_MEMORY_ADVICE_SET_PREFERRED_LOCATION);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    EXPECT_EQ(1, flags.device_preferred_location);
+
+    auto handlerWithHints = L0::handleGpuDomainTransferForHwWithHints;
+
+    EXPECT_EQ(handlerWithHints, reinterpret_cast<void *>(mockPageFaultManager->gpuDomainHandler));
+
+    NEO::PageFaultManager::PageFaultData pageData;
+    pageData.cmdQ = deviceImp;
+    pageData.domain = NEO::PageFaultManager::AllocationDomain::Cpu;
+    mockPageFaultManager->gpuDomainHandler(mockPageFaultManager, ptr, pageData);
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    EXPECT_EQ(0, flags.cpu_migration_blocked);
+
+    res = context->freeMem(ptr);
+    ASSERT_EQ(res, ZE_RESULT_SUCCESS);
+}
+
+TEST_F(CommandListMemAdvisePageFault, givenInvalidPtrAndPageFaultHandlerAndGpuDomainHandlerWithHintsSetThenHandlerAllowsCpuMigration) {
+    size_t size = 10;
+    size_t alignment = 1u;
+    void *ptr = nullptr;
+
+    ze_device_mem_alloc_desc_t deviceDesc = {};
+    auto res = context->allocDeviceMem(device->toHandle(),
+                                       &deviceDesc,
+                                       size, alignment, &ptr);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    EXPECT_NE(nullptr, ptr);
+
+    ze_result_t returnValue;
+    NEO::MemAdviseFlags flags;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, NEO::EngineGroupType::RenderCompute, 0u, returnValue));
+    ASSERT_NE(nullptr, commandList);
+
+    L0::DeviceImp *deviceImp = static_cast<L0::DeviceImp *>((L0::Device::fromHandle(device)));
+
+    auto allocData = device->getDriverHandle()->getSvmAllocsManager()->getSVMAlloc(ptr);
+
+    res = commandList->appendMemAdvise(device, ptr, size, ZE_MEMORY_ADVICE_SET_READ_MOSTLY);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    EXPECT_EQ(1, flags.read_only);
+
+    res = commandList->appendMemAdvise(device, ptr, size, ZE_MEMORY_ADVICE_SET_PREFERRED_LOCATION);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, res);
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    EXPECT_EQ(1, flags.device_preferred_location);
+
+    auto handlerWithHints = L0::handleGpuDomainTransferForHwWithHints;
+
+    EXPECT_EQ(handlerWithHints, reinterpret_cast<void *>(mockPageFaultManager->gpuDomainHandler));
+
+    NEO::PageFaultManager::PageFaultData pageData;
+    pageData.cmdQ = deviceImp;
+    pageData.domain = NEO::PageFaultManager::AllocationDomain::Gpu;
+    void *alloc = reinterpret_cast<void *>(0x1);
+    mockPageFaultManager->gpuDomainHandler(mockPageFaultManager, alloc, pageData);
+    flags = deviceImp->memAdviseSharedAllocations[allocData];
+    EXPECT_EQ(0, flags.cpu_migration_blocked);
+
+    res = context->freeMem(ptr);
     ASSERT_EQ(res, ZE_RESULT_SUCCESS);
 }
 
@@ -141,30 +722,87 @@ TEST_F(CommandListCreate, givenValidPtrThenAppendMemoryPrefetchReturnsSuccess) {
     size_t alignment = 1u;
     void *ptr = nullptr;
 
-    auto res = driverHandle->allocDeviceMem(device->toHandle(),
-                                            ZE_DEVICE_MEM_ALLOC_FLAG_DEFAULT,
-                                            size, alignment, &ptr);
+    ze_device_mem_alloc_desc_t deviceDesc = {};
+    auto res = context->allocDeviceMem(device->toHandle(),
+                                       &deviceDesc,
+                                       size, alignment, &ptr);
     EXPECT_EQ(ZE_RESULT_SUCCESS, res);
     EXPECT_NE(nullptr, ptr);
 
-    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, false));
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, NEO::EngineGroupType::RenderCompute, 0u, returnValue));
     ASSERT_NE(nullptr, commandList);
 
     res = commandList->appendMemoryPrefetch(ptr, size);
     EXPECT_EQ(ZE_RESULT_SUCCESS, res);
 
-    res = driverHandle->freeMem(ptr);
+    res = context->freeMem(ptr);
     ASSERT_EQ(res, ZE_RESULT_SUCCESS);
 }
 
+TEST_F(CommandListCreate, givenImmediateCommandListThenInternalEngineIsUsedIfRequested) {
+    const ze_command_queue_desc_t desc = {};
+    bool internalEngine = true;
+
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList0(CommandList::createImmediate(productFamily,
+                                                                               device,
+                                                                               &desc,
+                                                                               internalEngine,
+                                                                               NEO::EngineGroupType::RenderCompute,
+                                                                               returnValue));
+    ASSERT_NE(nullptr, commandList0);
+
+    CommandQueueImp *cmdQueue = reinterpret_cast<CommandQueueImp *>(commandList0->cmdQImmediate);
+    EXPECT_EQ(cmdQueue->getCsr(), neoDevice->getInternalEngine().commandStreamReceiver);
+
+    internalEngine = false;
+
+    std::unique_ptr<L0::CommandList> commandList1(CommandList::createImmediate(productFamily,
+                                                                               device,
+                                                                               &desc,
+                                                                               internalEngine,
+                                                                               NEO::EngineGroupType::RenderCompute,
+                                                                               returnValue));
+    ASSERT_NE(nullptr, commandList1);
+
+    cmdQueue = reinterpret_cast<CommandQueueImp *>(commandList1->cmdQImmediate);
+    EXPECT_NE(cmdQueue->getCsr(), neoDevice->getInternalEngine().commandStreamReceiver);
+}
+
+TEST_F(CommandListCreate, givenInternalUsageCommandListThenIsInternalReturnsTrue) {
+    const ze_command_queue_desc_t desc = {};
+
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList0(CommandList::createImmediate(productFamily,
+                                                                               device,
+                                                                               &desc,
+                                                                               true,
+                                                                               NEO::EngineGroupType::RenderCompute,
+                                                                               returnValue));
+
+    EXPECT_TRUE(commandList0->isInternal());
+}
+
+TEST_F(CommandListCreate, givenNonInternalUsageCommandListThenIsInternalReturnsFalse) {
+    const ze_command_queue_desc_t desc = {};
+
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList0(CommandList::createImmediate(productFamily,
+                                                                               device,
+                                                                               &desc,
+                                                                               false,
+                                                                               NEO::EngineGroupType::RenderCompute,
+                                                                               returnValue));
+
+    EXPECT_FALSE(commandList0->isInternal());
+}
+
 TEST_F(CommandListCreate, givenImmediateCommandListThenCustomNumIddPerBlockUsed) {
-    const ze_command_queue_desc_t desc = {
-        ZE_COMMAND_QUEUE_DESC_VERSION_CURRENT,
-        ZE_COMMAND_QUEUE_FLAG_NONE,
-        ZE_COMMAND_QUEUE_MODE_DEFAULT,
-        ZE_COMMAND_QUEUE_PRIORITY_NORMAL,
-        0};
-    std::unique_ptr<L0::CommandList> commandList(CommandList::createImmediate(productFamily, device, &desc, false, false));
+    const ze_command_queue_desc_t desc = {};
+
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::createImmediate(productFamily, device, &desc, false, NEO::EngineGroupType::RenderCompute, returnValue));
     ASSERT_NE(nullptr, commandList);
 
     const uint32_t cmdListImmediateIdds = CommandList::commandListimmediateIddsPerBlock;
@@ -172,13 +810,9 @@ TEST_F(CommandListCreate, givenImmediateCommandListThenCustomNumIddPerBlockUsed)
 }
 
 TEST_F(CommandListCreate, whenCreatingImmediateCommandListThenItHasImmediateCommandQueueCreated) {
-    const ze_command_queue_desc_t desc = {
-        ZE_COMMAND_QUEUE_DESC_VERSION_CURRENT,
-        ZE_COMMAND_QUEUE_FLAG_NONE,
-        ZE_COMMAND_QUEUE_MODE_DEFAULT,
-        ZE_COMMAND_QUEUE_PRIORITY_NORMAL,
-        0};
-    std::unique_ptr<L0::CommandList> commandList(CommandList::createImmediate(productFamily, device, &desc, false, false));
+    const ze_command_queue_desc_t desc = {};
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::createImmediate(productFamily, device, &desc, false, NEO::EngineGroupType::RenderCompute, returnValue));
     ASSERT_NE(nullptr, commandList);
 
     EXPECT_EQ(device, commandList->device);
@@ -186,15 +820,441 @@ TEST_F(CommandListCreate, whenCreatingImmediateCommandListThenItHasImmediateComm
     EXPECT_NE(nullptr, commandList->cmdQImmediate);
 }
 
+TEST_F(CommandListCreate, whenCreatingImmediateCommandListWithSyncModeThenItHasImmediateCommandQueueCreated) {
+    ze_command_queue_desc_t desc = {};
+    desc.mode = ZE_COMMAND_QUEUE_MODE_SYNCHRONOUS;
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::createImmediate(productFamily, device, &desc, false, NEO::EngineGroupType::RenderCompute, returnValue));
+    ASSERT_NE(nullptr, commandList);
+
+    EXPECT_EQ(device, commandList->device);
+    EXPECT_EQ(1u, commandList->cmdListType);
+    EXPECT_NE(nullptr, commandList->cmdQImmediate);
+}
+
+TEST_F(CommandListCreate, whenCreatingImmediateCommandListWithASyncModeThenItHasImmediateCommandQueueCreated) {
+    ze_command_queue_desc_t desc = {};
+    desc.mode = ZE_COMMAND_QUEUE_MODE_ASYNCHRONOUS;
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::createImmediate(productFamily, device, &desc, false, NEO::EngineGroupType::RenderCompute, returnValue));
+    ASSERT_NE(nullptr, commandList);
+
+    EXPECT_EQ(device, commandList->device);
+    EXPECT_EQ(1u, commandList->cmdListType);
+    EXPECT_NE(nullptr, commandList->cmdQImmediate);
+}
+
+TEST_F(CommandListCreate, whenCreatingImmCmdListWithSyncModeAndAppendSignalEventThenUpdateTaskCountNeededFlagIsDisabled) {
+    ze_command_queue_desc_t desc = {};
+    desc.mode = ZE_COMMAND_QUEUE_MODE_SYNCHRONOUS;
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::createImmediate(productFamily, device, &desc, false, NEO::EngineGroupType::RenderCompute, returnValue));
+    ASSERT_NE(nullptr, commandList);
+
+    EXPECT_EQ(device, commandList->device);
+    EXPECT_EQ(1u, commandList->cmdListType);
+    EXPECT_NE(nullptr, commandList->cmdQImmediate);
+
+    ze_event_pool_desc_t eventPoolDesc = {};
+    eventPoolDesc.count = 1;
+    eventPoolDesc.flags = ZE_EVENT_POOL_FLAG_HOST_VISIBLE | ZE_EVENT_POOL_FLAG_KERNEL_TIMESTAMP;
+
+    ze_event_desc_t eventDesc = {};
+    eventDesc.index = 0;
+    eventDesc.signal = ZE_EVENT_SCOPE_FLAG_HOST;
+    eventDesc.wait = ZE_EVENT_SCOPE_FLAG_HOST;
+
+    ze_event_handle_t event = nullptr;
+
+    std::unique_ptr<L0::EventPool> eventPool(EventPool::create(driverHandle.get(), context, 0, nullptr, &eventPoolDesc, returnValue));
+    EXPECT_EQ(ZE_RESULT_SUCCESS, returnValue);
+    ASSERT_NE(nullptr, eventPool);
+
+    eventPool->createEvent(&eventDesc, &event);
+
+    std::unique_ptr<L0::Event> event_object(L0::Event::fromHandle(event));
+    ASSERT_NE(nullptr, event_object->csr);
+    ASSERT_EQ(device->getNEODevice()->getDefaultEngine().commandStreamReceiver, event_object->csr);
+
+    commandList->appendSignalEvent(event);
+
+    auto result = event_object->hostSignal();
+    ASSERT_EQ(ZE_RESULT_SUCCESS, result);
+
+    EXPECT_EQ(event_object->queryStatus(), ZE_RESULT_SUCCESS);
+}
+
+TEST_F(CommandListCreate, whenCreatingImmCmdListWithSyncModeAndAppendBarrierThenUpdateTaskCountNeededFlagIsDisabled) {
+    ze_command_queue_desc_t desc = {};
+    desc.mode = ZE_COMMAND_QUEUE_MODE_SYNCHRONOUS;
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::createImmediate(productFamily, device, &desc, false, NEO::EngineGroupType::RenderCompute, returnValue));
+    ASSERT_NE(nullptr, commandList);
+
+    EXPECT_EQ(device, commandList->device);
+    EXPECT_EQ(1u, commandList->cmdListType);
+    EXPECT_NE(nullptr, commandList->cmdQImmediate);
+
+    ze_event_pool_desc_t eventPoolDesc = {};
+    eventPoolDesc.count = 1;
+    eventPoolDesc.flags = ZE_EVENT_POOL_FLAG_HOST_VISIBLE | ZE_EVENT_POOL_FLAG_KERNEL_TIMESTAMP;
+
+    ze_event_desc_t eventDesc = {};
+    eventDesc.index = 0;
+    eventDesc.signal = ZE_EVENT_SCOPE_FLAG_HOST;
+    eventDesc.wait = ZE_EVENT_SCOPE_FLAG_HOST;
+
+    ze_event_handle_t event = nullptr;
+
+    std::unique_ptr<L0::EventPool> eventPool(EventPool::create(driverHandle.get(), context, 0, nullptr, &eventPoolDesc, returnValue));
+    EXPECT_EQ(ZE_RESULT_SUCCESS, returnValue);
+    ASSERT_NE(nullptr, eventPool);
+
+    eventPool->createEvent(&eventDesc, &event);
+
+    std::unique_ptr<L0::Event> event_object(L0::Event::fromHandle(event));
+    ASSERT_NE(nullptr, event_object->csr);
+    ASSERT_EQ(device->getNEODevice()->getDefaultEngine().commandStreamReceiver, event_object->csr);
+
+    commandList->appendBarrier(nullptr, 1, &event);
+
+    auto result = event_object->hostSignal();
+    ASSERT_EQ(ZE_RESULT_SUCCESS, result);
+
+    EXPECT_EQ(event_object->queryStatus(), ZE_RESULT_SUCCESS);
+
+    commandList->appendBarrier(nullptr, 0, nullptr);
+}
+
+TEST_F(CommandListCreate, whenCreatingImmCmdListWithSyncModeAndAppendResetEventThenUpdateTaskCountNeededFlagIsDisabled) {
+    ze_command_queue_desc_t desc = {};
+    desc.mode = ZE_COMMAND_QUEUE_MODE_SYNCHRONOUS;
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::createImmediate(productFamily, device, &desc, false, NEO::EngineGroupType::RenderCompute, returnValue));
+    ASSERT_NE(nullptr, commandList);
+
+    EXPECT_EQ(device, commandList->device);
+    EXPECT_EQ(1u, commandList->cmdListType);
+    EXPECT_NE(nullptr, commandList->cmdQImmediate);
+
+    ze_event_pool_desc_t eventPoolDesc = {};
+    eventPoolDesc.count = 1;
+    eventPoolDesc.flags = ZE_EVENT_POOL_FLAG_HOST_VISIBLE | ZE_EVENT_POOL_FLAG_KERNEL_TIMESTAMP;
+
+    ze_event_desc_t eventDesc = {};
+    eventDesc.index = 0;
+    eventDesc.signal = ZE_EVENT_SCOPE_FLAG_HOST;
+    eventDesc.wait = ZE_EVENT_SCOPE_FLAG_HOST;
+
+    ze_event_handle_t event = nullptr;
+
+    std::unique_ptr<L0::EventPool> eventPool(EventPool::create(driverHandle.get(), context, 0, nullptr, &eventPoolDesc, returnValue));
+    EXPECT_EQ(ZE_RESULT_SUCCESS, returnValue);
+    ASSERT_NE(nullptr, eventPool);
+
+    eventPool->createEvent(&eventDesc, &event);
+
+    std::unique_ptr<L0::Event> event_object(L0::Event::fromHandle(event));
+    ASSERT_NE(nullptr, event_object->csr);
+    ASSERT_EQ(device->getNEODevice()->getDefaultEngine().commandStreamReceiver, event_object->csr);
+
+    commandList->appendEventReset(event);
+
+    auto result = event_object->hostSignal();
+    ASSERT_EQ(ZE_RESULT_SUCCESS, result);
+
+    EXPECT_EQ(event_object->queryStatus(), ZE_RESULT_SUCCESS);
+}
+
+TEST_F(CommandListCreate, whenCreatingImmCmdListWithASyncModeAndAppendSignalEventThenUpdateTaskCountNeededFlagIsEnabled) {
+    ze_command_queue_desc_t desc = {};
+    desc.mode = ZE_COMMAND_QUEUE_MODE_ASYNCHRONOUS;
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::createImmediate(productFamily, device, &desc, false, NEO::EngineGroupType::RenderCompute, returnValue));
+    ASSERT_NE(nullptr, commandList);
+
+    EXPECT_EQ(device, commandList->device);
+    EXPECT_EQ(1u, commandList->cmdListType);
+    EXPECT_NE(nullptr, commandList->cmdQImmediate);
+
+    ze_event_pool_desc_t eventPoolDesc = {};
+    eventPoolDesc.count = 1;
+    eventPoolDesc.flags = ZE_EVENT_POOL_FLAG_HOST_VISIBLE;
+
+    ze_event_desc_t eventDesc = {};
+    eventDesc.index = 0;
+    eventDesc.signal = 0;
+    eventDesc.wait = ZE_EVENT_SCOPE_FLAG_HOST;
+
+    ze_event_handle_t event = nullptr;
+
+    std::unique_ptr<L0::EventPool> eventPool(EventPool::create(driverHandle.get(), context, 0, nullptr, &eventPoolDesc, returnValue));
+    EXPECT_EQ(ZE_RESULT_SUCCESS, returnValue);
+    ASSERT_NE(nullptr, eventPool);
+
+    eventPool->createEvent(&eventDesc, &event);
+
+    std::unique_ptr<L0::Event> event_object(L0::Event::fromHandle(event));
+    ASSERT_NE(nullptr, event_object->csr);
+    ASSERT_EQ(device->getNEODevice()->getDefaultEngine().commandStreamReceiver, event_object->csr);
+
+    commandList->appendSignalEvent(event);
+
+    auto result = event_object->hostSignal();
+    ASSERT_EQ(ZE_RESULT_SUCCESS, result);
+
+    EXPECT_EQ(event_object->queryStatus(), ZE_RESULT_SUCCESS);
+}
+
+TEST_F(CommandListCreate, whenCreatingImmCmdListWithASyncModeAndAppendBarrierThenUpdateTaskCountNeededFlagIsEnabled) {
+    ze_command_queue_desc_t desc = {};
+    desc.mode = ZE_COMMAND_QUEUE_MODE_ASYNCHRONOUS;
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::createImmediate(productFamily, device, &desc, false, NEO::EngineGroupType::RenderCompute, returnValue));
+    ASSERT_NE(nullptr, commandList);
+
+    EXPECT_EQ(device, commandList->device);
+    EXPECT_EQ(1u, commandList->cmdListType);
+    EXPECT_NE(nullptr, commandList->cmdQImmediate);
+
+    ze_event_pool_desc_t eventPoolDesc = {};
+    eventPoolDesc.count = 1;
+    eventPoolDesc.flags = ZE_EVENT_POOL_FLAG_HOST_VISIBLE;
+
+    ze_event_desc_t eventDesc = {};
+    eventDesc.index = 0;
+    eventDesc.signal = ZE_EVENT_SCOPE_FLAG_HOST;
+    eventDesc.wait = ZE_EVENT_SCOPE_FLAG_HOST;
+
+    ze_event_handle_t event = nullptr;
+
+    std::unique_ptr<L0::EventPool> eventPool(EventPool::create(driverHandle.get(), context, 0, nullptr, &eventPoolDesc, returnValue));
+    EXPECT_EQ(ZE_RESULT_SUCCESS, returnValue);
+    ASSERT_NE(nullptr, eventPool);
+
+    eventPool->createEvent(&eventDesc, &event);
+
+    std::unique_ptr<L0::Event> event_object(L0::Event::fromHandle(event));
+    ASSERT_NE(nullptr, event_object->csr);
+    ASSERT_EQ(device->getNEODevice()->getDefaultEngine().commandStreamReceiver, event_object->csr);
+
+    commandList->appendBarrier(event, 0, nullptr);
+
+    auto result = event_object->hostSignal();
+    ASSERT_EQ(ZE_RESULT_SUCCESS, result);
+
+    EXPECT_EQ(event_object->queryStatus(), ZE_RESULT_SUCCESS);
+
+    commandList->appendBarrier(nullptr, 0, nullptr);
+}
+
+TEST_F(CommandListCreate, whenCreatingImmCmdListWithASyncModeAndCopyEngineAndAppendBarrierThenUpdateTaskCountNeededFlagIsEnabled) {
+    ze_command_queue_desc_t desc = {};
+    desc.mode = ZE_COMMAND_QUEUE_MODE_ASYNCHRONOUS;
+
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::createImmediate(productFamily, device, &desc, false, NEO::EngineGroupType::Copy, returnValue));
+    ASSERT_NE(nullptr, commandList);
+
+    EXPECT_EQ(device, commandList->device);
+    EXPECT_EQ(1u, commandList->cmdListType);
+    EXPECT_NE(nullptr, commandList->cmdQImmediate);
+
+    ze_event_pool_desc_t eventPoolDesc = {};
+    eventPoolDesc.count = 1;
+    eventPoolDesc.flags = ZE_EVENT_POOL_FLAG_HOST_VISIBLE;
+
+    ze_event_desc_t eventDesc = {};
+    eventDesc.index = 0;
+    eventDesc.signal = ZE_EVENT_SCOPE_FLAG_HOST;
+    eventDesc.wait = ZE_EVENT_SCOPE_FLAG_HOST;
+
+    ze_event_handle_t event = nullptr;
+
+    std::unique_ptr<L0::EventPool> eventPool(EventPool::create(driverHandle.get(), context, 0, nullptr, &eventPoolDesc, returnValue));
+    EXPECT_EQ(ZE_RESULT_SUCCESS, returnValue);
+    ASSERT_NE(nullptr, eventPool);
+
+    eventPool->createEvent(&eventDesc, &event);
+
+    std::unique_ptr<L0::Event> event_object(L0::Event::fromHandle(event));
+    ASSERT_NE(nullptr, event_object->csr);
+    ASSERT_EQ(device->getNEODevice()->getDefaultEngine().commandStreamReceiver, event_object->csr);
+
+    commandList->appendBarrier(event, 0, nullptr);
+
+    auto result = event_object->hostSignal();
+    ASSERT_EQ(ZE_RESULT_SUCCESS, result);
+
+    EXPECT_EQ(event_object->queryStatus(), ZE_RESULT_SUCCESS);
+
+    commandList->appendBarrier(nullptr, 0, nullptr);
+}
+
+TEST_F(CommandListCreate, whenCreatingImmCmdListWithASyncModeAndAppendEventResetThenUpdateTaskCountNeededFlagIsEnabled) {
+    ze_command_queue_desc_t desc = {};
+    desc.mode = ZE_COMMAND_QUEUE_MODE_ASYNCHRONOUS;
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::createImmediate(productFamily, device, &desc, false, NEO::EngineGroupType::RenderCompute, returnValue));
+    ASSERT_NE(nullptr, commandList);
+
+    EXPECT_EQ(device, commandList->device);
+    EXPECT_EQ(1u, commandList->cmdListType);
+    EXPECT_NE(nullptr, commandList->cmdQImmediate);
+
+    ze_event_pool_desc_t eventPoolDesc = {};
+    eventPoolDesc.count = 1;
+    eventPoolDesc.flags = ZE_EVENT_POOL_FLAG_HOST_VISIBLE;
+
+    ze_event_desc_t eventDesc = {};
+    eventDesc.index = 0;
+    eventDesc.signal = ZE_EVENT_SCOPE_FLAG_HOST;
+    eventDesc.wait = ZE_EVENT_SCOPE_FLAG_HOST;
+
+    ze_event_handle_t event = nullptr;
+
+    std::unique_ptr<L0::EventPool> eventPool(EventPool::create(driverHandle.get(), context, 0, nullptr, &eventPoolDesc, returnValue));
+    EXPECT_EQ(ZE_RESULT_SUCCESS, returnValue);
+    ASSERT_NE(nullptr, eventPool);
+
+    eventPool->createEvent(&eventDesc, &event);
+
+    std::unique_ptr<L0::Event> event_object(L0::Event::fromHandle(event));
+    ASSERT_NE(nullptr, event_object->csr);
+    ASSERT_EQ(device->getNEODevice()->getDefaultEngine().commandStreamReceiver, event_object->csr);
+
+    commandList->appendEventReset(event);
+
+    auto result = event_object->hostSignal();
+    ASSERT_EQ(ZE_RESULT_SUCCESS, result);
+
+    EXPECT_EQ(event_object->queryStatus(), ZE_RESULT_SUCCESS);
+}
+
+TEST_F(CommandListCreate, whenInvokingAppendMemoryCopyFromContextForImmediateCommandListWithSyncModeThenSuccessIsReturned) {
+    ze_command_queue_desc_t desc = {};
+    desc.mode = ZE_COMMAND_QUEUE_MODE_SYNCHRONOUS;
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::createImmediate(productFamily, device, &desc, false, NEO::EngineGroupType::Copy, returnValue));
+    ASSERT_NE(nullptr, commandList);
+
+    EXPECT_EQ(device, commandList->device);
+    EXPECT_EQ(CommandList::CommandListType::TYPE_IMMEDIATE, commandList->cmdListType);
+    EXPECT_NE(nullptr, commandList->cmdQImmediate);
+
+    void *srcPtr = reinterpret_cast<void *>(0x1234);
+    void *dstPtr = reinterpret_cast<void *>(0x2345);
+    auto result = commandList->appendMemoryCopyFromContext(dstPtr, nullptr, srcPtr, 8, nullptr, 0, nullptr);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, result);
+}
+
+struct CommandListCreateWithDeferredOsContextInitialization : ContextCommandListCreate {
+    void SetUp() override {
+        DebugManager.flags.DeferOsContextInitialization.set(1);
+        ContextCommandListCreate::SetUp();
+    }
+
+    void TearDown() override {
+        ContextCommandListCreate::TearDown();
+    }
+
+    DebugManagerStateRestore restore;
+};
+TEST_F(ContextCommandListCreate, givenDeferredEngineCreationWhenImmediateCommandListIsCreatedThenEngineIsInitialized) {
+    uint32_t groupsCount{};
+    EXPECT_EQ(ZE_RESULT_SUCCESS, device->getCommandQueueGroupProperties(&groupsCount, nullptr));
+    auto groups = std::vector<ze_command_queue_group_properties_t>(groupsCount);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, device->getCommandQueueGroupProperties(&groupsCount, groups.data()));
+
+    for (uint32_t groupIndex = 0u; groupIndex < groupsCount; groupIndex++) {
+        const auto &group = groups[groupIndex];
+        for (uint32_t queueIndex = 0; queueIndex < group.numQueues; queueIndex++) {
+            CommandStreamReceiver *expectedCsr{};
+            EXPECT_EQ(ZE_RESULT_SUCCESS, device->getCsrForOrdinalAndIndex(&expectedCsr, groupIndex, queueIndex));
+
+            ze_command_queue_desc_t desc = {};
+            desc.mode = ZE_COMMAND_QUEUE_MODE_SYNCHRONOUS;
+            desc.ordinal = groupIndex;
+            desc.index = queueIndex;
+            ze_command_list_handle_t cmdListHandle;
+            ze_result_t result = context->createCommandListImmediate(device, &desc, &cmdListHandle);
+            L0::CommandList *cmdList = L0::CommandList::fromHandle(cmdListHandle);
+
+            EXPECT_EQ(device, cmdList->device);
+            EXPECT_EQ(CommandList::CommandListType::TYPE_IMMEDIATE, cmdList->cmdListType);
+            EXPECT_NE(nullptr, cmdList);
+            EXPECT_EQ(ZE_RESULT_SUCCESS, result);
+            EXPECT_TRUE(expectedCsr->getOsContext().isInitialized());
+            EXPECT_EQ(ZE_RESULT_SUCCESS, cmdList->destroy());
+        }
+    }
+}
+
+TEST_F(CommandListCreate, whenInvokingAppendMemoryCopyFromContextForImmediateCommandListWithASyncModeThenSuccessIsReturned) {
+    ze_command_queue_desc_t desc = {};
+    desc.mode = ZE_COMMAND_QUEUE_MODE_ASYNCHRONOUS;
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::createImmediate(productFamily, device, &desc, false, NEO::EngineGroupType::Copy, returnValue));
+    ASSERT_NE(nullptr, commandList);
+
+    EXPECT_EQ(device, commandList->device);
+    EXPECT_EQ(CommandList::CommandListType::TYPE_IMMEDIATE, commandList->cmdListType);
+    EXPECT_NE(nullptr, commandList->cmdQImmediate);
+
+    void *srcPtr = reinterpret_cast<void *>(0x1234);
+    void *dstPtr = reinterpret_cast<void *>(0x2345);
+    auto result = commandList->appendMemoryCopyFromContext(dstPtr, nullptr, srcPtr, 8, nullptr, 0, nullptr);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, result);
+}
+
+TEST_F(CommandListCreate, whenInvokingAppendMemoryCopyFromContextForImmediateCommandListThenSuccessIsReturned) {
+    const ze_command_queue_desc_t desc = {};
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::createImmediate(productFamily, device, &desc, false, NEO::EngineGroupType::Copy, returnValue));
+    ASSERT_NE(nullptr, commandList);
+
+    EXPECT_EQ(device, commandList->device);
+    EXPECT_EQ(CommandList::CommandListType::TYPE_IMMEDIATE, commandList->cmdListType);
+    EXPECT_NE(nullptr, commandList->cmdQImmediate);
+
+    void *srcPtr = reinterpret_cast<void *>(0x1234);
+    void *dstPtr = reinterpret_cast<void *>(0x2345);
+    auto result = commandList->appendMemoryCopyFromContext(dstPtr, nullptr, srcPtr, 8, nullptr, 0, nullptr);
+    EXPECT_EQ(ZE_RESULT_SUCCESS, result);
+}
+
+TEST_F(CommandListCreate, givenQueueDescriptionwhenCreatingImmediateCommandListForEveryEnigneThenItHasImmediateCommandQueueCreated) {
+    auto &engineGroups = neoDevice->getRegularEngineGroups();
+    for (uint32_t ordinal = 0; ordinal < engineGroups.size(); ordinal++) {
+        for (uint32_t index = 0; index < engineGroups[ordinal].engines.size(); index++) {
+            ze_command_queue_desc_t desc = {};
+            desc.ordinal = ordinal;
+            desc.index = index;
+            ze_result_t returnValue;
+            std::unique_ptr<L0::CommandList> commandList(CommandList::createImmediate(productFamily, device, &desc, false, NEO::EngineGroupType::RenderCompute, returnValue));
+            ASSERT_NE(nullptr, commandList);
+
+            EXPECT_EQ(device, commandList->device);
+            EXPECT_EQ(CommandList::CommandListType::TYPE_IMMEDIATE, commandList->cmdListType);
+            EXPECT_NE(nullptr, commandList->cmdQImmediate);
+        }
+    }
+}
+
 TEST_F(CommandListCreate, givenInvalidProductFamilyThenReturnsNullPointer) {
-    std::unique_ptr<L0::CommandList> commandList(CommandList::create(IGFX_UNKNOWN, device, false));
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::create(IGFX_UNKNOWN, device, NEO::EngineGroupType::RenderCompute, 0u, returnValue));
     EXPECT_EQ(nullptr, commandList);
 }
 
-HWTEST_F(CommandListCreate, whenCommandListIsCreatedThenStateBaseAddressCmdIsAddedAndCorrectlyProgrammed) {
+HWCMDTEST_F(IGFX_GEN8_CORE, CommandListCreate, whenCommandListIsCreatedThenPCAndStateBaseAddressCmdsAreAddedAndCorrectlyProgrammed) {
+    DebugManagerStateRestore dbgRestorer;
+    DebugManager.flags.UseBindlessMode.set(0);
     using STATE_BASE_ADDRESS = typename FamilyType::STATE_BASE_ADDRESS;
+    using PIPE_CONTROL = typename FamilyType::PIPE_CONTROL;
 
-    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, false));
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, NEO::EngineGroupType::RenderCompute, 0u, returnValue));
     auto &commandContainer = commandList->commandContainer;
     auto gmmHelper = commandContainer.getDevice()->getGmmHelper();
 
@@ -210,8 +1270,17 @@ HWTEST_F(CommandListCreate, whenCommandListIsCreatedThenStateBaseAddressCmdIsAdd
     GenCmdList cmdList;
     ASSERT_TRUE(FamilyType::PARSE::parseCommandBuffer(
         cmdList, ptrOffset(commandContainer.getCommandStream()->getCpuBase(), 0), usedSpaceAfter));
-    auto itor = find<STATE_BASE_ADDRESS *>(cmdList.begin(), cmdList.end());
+
+    auto itorPc = find<PIPE_CONTROL *>(cmdList.begin(), cmdList.end());
+    ASSERT_NE(cmdList.end(), itorPc);
+    auto cmdPc = genCmdCast<PIPE_CONTROL *>(*itorPc);
+    EXPECT_TRUE(cmdPc->getDcFlushEnable());
+    EXPECT_TRUE(cmdPc->getCommandStreamerStallEnable());
+    EXPECT_TRUE(cmdPc->getTextureCacheInvalidationEnable());
+
+    auto itor = find<STATE_BASE_ADDRESS *>(itorPc, cmdList.end());
     ASSERT_NE(cmdList.end(), itor);
+
     auto cmdSba = genCmdCast<STATE_BASE_ADDRESS *>(*itor);
 
     auto dsh = commandContainer.getIndirectHeap(NEO::HeapType::DYNAMIC_STATE);
@@ -234,10 +1303,67 @@ HWTEST_F(CommandListCreate, whenCommandListIsCreatedThenStateBaseAddressCmdIsAdd
     EXPECT_EQ(gmmHelper->getMOCS(GMM_RESOURCE_USAGE_OCL_BUFFER), cmdSba->getStatelessDataPortAccessMemoryObjectControlState());
 }
 
+HWCMDTEST_F(IGFX_GEN8_CORE, CommandListCreate, whenBindlessModeEnabledWhenCommandListIsCreatedThenStateBaseAddressCmdsIsNotAdded) {
+    DebugManagerStateRestore dbgRestorer;
+    DebugManager.flags.UseBindlessMode.set(1);
+    using STATE_BASE_ADDRESS = typename FamilyType::STATE_BASE_ADDRESS;
+    using PIPE_CONTROL = typename FamilyType::PIPE_CONTROL;
+
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, NEO::EngineGroupType::RenderCompute, 0u, returnValue));
+    auto &commandContainer = commandList->commandContainer;
+
+    ASSERT_NE(nullptr, commandContainer.getCommandStream());
+    auto usedSpaceBefore = commandContainer.getCommandStream()->getUsed();
+
+    auto result = commandList->close();
+    ASSERT_EQ(ZE_RESULT_SUCCESS, result);
+
+    auto usedSpaceAfter = commandContainer.getCommandStream()->getUsed();
+    ASSERT_GT(usedSpaceAfter, usedSpaceBefore);
+
+    GenCmdList cmdList;
+    ASSERT_TRUE(FamilyType::PARSE::parseCommandBuffer(
+        cmdList, ptrOffset(commandContainer.getCommandStream()->getCpuBase(), 0), usedSpaceAfter));
+
+    auto itor = find<STATE_BASE_ADDRESS *>(cmdList.begin(), cmdList.end());
+    ASSERT_EQ(cmdList.end(), itor);
+}
+
+HWCMDTEST_F(IGFX_GEN8_CORE, CommandListCreate, whenBindlessModeEnabledWhenCommandListImmediateIsCreatedThenStateBaseAddressCmdsIsNotAdded) {
+    DebugManagerStateRestore dbgRestorer;
+    DebugManager.flags.UseBindlessMode.set(1);
+    using STATE_BASE_ADDRESS = typename FamilyType::STATE_BASE_ADDRESS;
+    using PIPE_CONTROL = typename FamilyType::PIPE_CONTROL;
+
+    ze_command_queue_desc_t desc = {};
+    desc.mode = ZE_COMMAND_QUEUE_MODE_ASYNCHRONOUS;
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::createImmediate(productFamily, device, &desc, false, NEO::EngineGroupType::RenderCompute, returnValue));
+    auto &commandContainer = commandList->commandContainer;
+
+    ASSERT_NE(nullptr, commandContainer.getCommandStream());
+    auto usedSpaceBefore = commandContainer.getCommandStream()->getUsed();
+
+    auto result = commandList->close();
+    ASSERT_EQ(ZE_RESULT_SUCCESS, result);
+
+    auto usedSpaceAfter = commandContainer.getCommandStream()->getUsed();
+    ASSERT_GT(usedSpaceAfter, usedSpaceBefore);
+
+    GenCmdList cmdList;
+    ASSERT_TRUE(FamilyType::PARSE::parseCommandBuffer(
+        cmdList, ptrOffset(commandContainer.getCommandStream()->getCpuBase(), 0), usedSpaceAfter));
+
+    auto itor = find<STATE_BASE_ADDRESS *>(cmdList.begin(), cmdList.end());
+    ASSERT_EQ(cmdList.end(), itor);
+}
+
 HWTEST_F(CommandListCreate, givenCommandListWithCopyOnlyWhenCreatedThenStateBaseAddressCmdIsNotProgrammed) {
     using STATE_BASE_ADDRESS = typename FamilyType::STATE_BASE_ADDRESS;
 
-    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, true));
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, NEO::EngineGroupType::Copy, 0u, returnValue));
     auto &commandContainer = commandList->commandContainer;
 
     GenCmdList cmdList;
@@ -250,7 +1376,8 @@ HWTEST_F(CommandListCreate, givenCommandListWithCopyOnlyWhenCreatedThenStateBase
 
 HWTEST_F(CommandListCreate, givenCommandListWithCopyOnlyWhenSetBarrierThenMiFlushDWIsProgrammed) {
     using MI_FLUSH_DW = typename FamilyType::MI_FLUSH_DW;
-    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, true));
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, NEO::EngineGroupType::Copy, 0u, returnValue));
     auto &commandContainer = commandList->commandContainer;
     commandList->appendBarrier(nullptr, 0, nullptr);
     GenCmdList cmdList;
@@ -259,11 +1386,108 @@ HWTEST_F(CommandListCreate, givenCommandListWithCopyOnlyWhenSetBarrierThenMiFlus
     auto itor = find<MI_FLUSH_DW *>(cmdList.begin(), cmdList.end());
 
     EXPECT_NE(cmdList.end(), itor);
+}
+
+HWTEST_F(CommandListCreate, givenImmediateCommandListWithCopyOnlyWhenSetBarrierThenMiFlushCmdIsNotInsertedInTheCmdContainer) {
+    using MI_FLUSH_DW = typename FamilyType::MI_FLUSH_DW;
+    ze_command_queue_desc_t desc = {};
+    desc.mode = ZE_COMMAND_QUEUE_MODE_ASYNCHRONOUS;
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::createImmediate(productFamily, device, &desc, false, NEO::EngineGroupType::Copy, returnValue));
+    ASSERT_NE(nullptr, commandList);
+
+    EXPECT_EQ(device, commandList->device);
+    EXPECT_EQ(1u, commandList->cmdListType);
+    EXPECT_NE(nullptr, commandList->cmdQImmediate);
+
+    auto &commandContainer = commandList->commandContainer;
+    commandList->appendBarrier(nullptr, 0, nullptr);
+    GenCmdList cmdList;
+    ASSERT_TRUE(FamilyType::PARSE::parseCommandBuffer(
+        cmdList, ptrOffset(commandContainer.getCommandStream()->getCpuBase(), 0), commandContainer.getCommandStream()->getUsed()));
+    auto itor = find<MI_FLUSH_DW *>(cmdList.begin(), cmdList.end());
+
+    EXPECT_EQ(cmdList.end(), itor);
+}
+
+HWTEST_F(CommandListCreate, whenCommandListIsResetThenContainsStatelessUncachedResourceIsSetToFalse) {
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily,
+                                                                     device,
+                                                                     NEO::EngineGroupType::Compute,
+                                                                     0u,
+                                                                     returnValue));
+    EXPECT_EQ(ZE_RESULT_SUCCESS, returnValue);
+
+    returnValue = commandList->reset();
+    EXPECT_EQ(ZE_RESULT_SUCCESS, returnValue);
+
+    EXPECT_FALSE(commandList->getContainsStatelessUncachedResource());
+}
+
+HWTEST_F(CommandListCreate, givenBindlessModeEnabledWhenCommandListsResetThenSbaNotReloaded) {
+    DebugManagerStateRestore dbgRestorer;
+    DebugManager.flags.UseBindlessMode.set(1);
+    using STATE_BASE_ADDRESS = typename FamilyType::STATE_BASE_ADDRESS;
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily,
+                                                                     device,
+                                                                     NEO::EngineGroupType::Compute,
+                                                                     0u,
+                                                                     returnValue));
+    EXPECT_EQ(ZE_RESULT_SUCCESS, returnValue);
+    returnValue = commandList->reset();
+    auto usedAfter = commandList->commandContainer.getCommandStream()->getUsed();
+    EXPECT_EQ(ZE_RESULT_SUCCESS, returnValue);
+    GenCmdList cmdList;
+    ASSERT_TRUE(FamilyType::PARSE::parseCommandBuffer(
+        cmdList, ptrOffset(commandList->commandContainer.getCommandStream()->getCpuBase(), 0), usedAfter));
+
+    auto itor = find<STATE_BASE_ADDRESS *>(cmdList.begin(), cmdList.end());
+    ASSERT_EQ(cmdList.end(), itor);
+}
+HWTEST_F(CommandListCreate, givenBindlessModeDisabledWhenCommandListsResetThenSbaReloaded) {
+    DebugManagerStateRestore dbgRestorer;
+    DebugManager.flags.UseBindlessMode.set(0);
+    using STATE_BASE_ADDRESS = typename FamilyType::STATE_BASE_ADDRESS;
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily,
+                                                                     device,
+                                                                     NEO::EngineGroupType::Compute,
+                                                                     0u,
+                                                                     returnValue));
+    EXPECT_EQ(ZE_RESULT_SUCCESS, returnValue);
+    returnValue = commandList->reset();
+    auto usedAfter = commandList->commandContainer.getCommandStream()->getUsed();
+    EXPECT_EQ(ZE_RESULT_SUCCESS, returnValue);
+    GenCmdList cmdList;
+    ASSERT_TRUE(FamilyType::PARSE::parseCommandBuffer(
+        cmdList, ptrOffset(commandList->commandContainer.getCommandStream()->getCpuBase(), 0), usedAfter));
+
+    auto itor = find<STATE_BASE_ADDRESS *>(cmdList.begin(), cmdList.end());
+    ASSERT_NE(cmdList.end(), itor);
+}
+
+HWTEST_F(CommandListCreate, givenCommandListWithCopyOnlyWhenResetThenStateBaseAddressNotProgrammed) {
+    using STATE_BASE_ADDRESS = typename FamilyType::STATE_BASE_ADDRESS;
+
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, NEO::EngineGroupType::Copy, 0u, returnValue));
+    auto &commandContainer = commandList->commandContainer;
+    commandList->reset();
+
+    GenCmdList cmdList;
+    ASSERT_TRUE(FamilyType::PARSE::parseCommandBuffer(
+        cmdList, ptrOffset(commandContainer.getCommandStream()->getCpuBase(), 0), commandContainer.getCommandStream()->getUsed()));
+    auto itor = find<STATE_BASE_ADDRESS *>(cmdList.begin(), cmdList.end());
+
+    EXPECT_EQ(cmdList.end(), itor);
 }
 
 HWTEST_F(CommandListCreate, givenCommandListWhenSetBarrierThenPipeControlIsProgrammed) {
     using PIPE_CONTROL = typename FamilyType::PIPE_CONTROL;
-    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, false));
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, NEO::EngineGroupType::RenderCompute, 0u, returnValue));
     auto &commandContainer = commandList->commandContainer;
     commandList->appendBarrier(nullptr, 0, nullptr);
     GenCmdList cmdList;
@@ -273,476 +1497,79 @@ HWTEST_F(CommandListCreate, givenCommandListWhenSetBarrierThenPipeControlIsProgr
 
     EXPECT_NE(cmdList.end(), itor);
 }
-using AppendMemoryCopy = CommandListCreate;
-using Platforms = IsAtLeastProduct<IGFX_SKYLAKE>;
 
-HWTEST2_F(AppendMemoryCopy, givenCopyOnlyCommandListAndHostPointersWhenMemoryCopyCalledThenPipeControlWithDcFlushAddedIsNotAddedAfterBlitCopy, Platforms) {
+HWTEST2_F(CommandListCreate, givenCommandListWhenAppendingBarrierThenPipeControlIsProgrammedAndHdcFlushIsSet, IsAtLeastXeHpCore) {
     using PIPE_CONTROL = typename FamilyType::PIPE_CONTROL;
-    using GfxFamily = typename NEO::GfxFamilyMapper<gfxCoreFamily>::GfxFamily;
-    using XY_COPY_BLT = typename GfxFamily::XY_COPY_BLT;
-
-    auto commandList = std::make_unique<WhiteBox<::L0::CommandListCoreFamily<gfxCoreFamily>>>();
-    commandList->initialize(device, true);
-    void *srcPtr = reinterpret_cast<void *>(0x1234);
-    void *dstPtr = reinterpret_cast<void *>(0x2345);
-    commandList->appendMemoryCopy(dstPtr, srcPtr, 8, nullptr, 0, nullptr);
-
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, NEO::EngineGroupType::RenderCompute, 0u, returnValue));
     auto &commandContainer = commandList->commandContainer;
-    GenCmdList genCmdList;
-    ASSERT_TRUE(FamilyType::PARSE::parseCommandBuffer(
-        genCmdList, ptrOffset(commandContainer.getCommandStream()->getCpuBase(), 0), commandContainer.getCommandStream()->getUsed()));
-    auto itor = find<XY_COPY_BLT *>(genCmdList.begin(), genCmdList.end());
-    ASSERT_NE(genCmdList.end(), itor);
-
-    itor = find<PIPE_CONTROL *>(++itor, genCmdList.end());
-
-    EXPECT_EQ(genCmdList.end(), itor);
-}
-
-HWTEST2_F(AppendMemoryCopy, givenCopyOnlyCommandListAndHostPointersWhenMemoryCopyRegionCalledThenPipeControlWithDcFlushAddedIsNotAddedAfterBlitCopy, Platforms) {
-    using PIPE_CONTROL = typename FamilyType::PIPE_CONTROL;
-    using GfxFamily = typename NEO::GfxFamilyMapper<gfxCoreFamily>::GfxFamily;
-    using XY_COPY_BLT = typename GfxFamily::XY_COPY_BLT;
-
-    auto commandList = std::make_unique<WhiteBox<::L0::CommandListCoreFamily<gfxCoreFamily>>>();
-    commandList->initialize(device, true);
-    void *srcPtr = reinterpret_cast<void *>(0x1234);
-    void *dstPtr = reinterpret_cast<void *>(0x2345);
-    ze_copy_region_t dstRegion = {4, 4, 0, 2, 2, 1};
-    ze_copy_region_t srcRegion = {4, 4, 0, 2, 2, 1};
-    commandList->appendMemoryCopyRegion(dstPtr, &dstRegion, 0, 0, srcPtr, &srcRegion, 0, 0, nullptr);
-
-    auto &commandContainer = commandList->commandContainer;
-    GenCmdList genCmdList;
-    ASSERT_TRUE(FamilyType::PARSE::parseCommandBuffer(
-        genCmdList, ptrOffset(commandContainer.getCommandStream()->getCpuBase(), 0), commandContainer.getCommandStream()->getUsed()));
-    auto itor = find<XY_COPY_BLT *>(genCmdList.begin(), genCmdList.end());
-    ASSERT_NE(genCmdList.end(), itor);
-
-    itor = find<PIPE_CONTROL *>(++itor, genCmdList.end());
-
-    EXPECT_EQ(genCmdList.end(), itor);
-}
-
-class MockEvent : public Mock<Event> {
-  public:
-    MockEvent() {
-        mockAllocation.reset(new NEO::MockGraphicsAllocation(0, NEO::GraphicsAllocation::AllocationType::INTERNAL_HOST_MEMORY,
-                                                             reinterpret_cast<void *>(0x1234), 0x1000, 0, sizeof(uint32_t),
-                                                             MemoryPool::System4KBPages));
-        gpuAddress = mockAllocation->getGpuAddress();
-    }
-    NEO::GraphicsAllocation &getAllocation() override {
-        return *mockAllocation.get();
-    }
-    std::unique_ptr<NEO::GraphicsAllocation> mockAllocation;
-};
-
-HWTEST_F(CommandListCreate, givenCommandListWithCopyOnlyWhenAppendSignalEventThenMiFlushDWIsProgrammed) {
-    using MI_FLUSH_DW = typename FamilyType::MI_FLUSH_DW;
-    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, true));
-    auto &commandContainer = commandList->commandContainer;
-    MockEvent event;
-    event.waitScope = ZE_EVENT_SCOPE_FLAG_NONE;
-    event.signalScope = ZE_EVENT_SCOPE_FLAG_NONE;
-    commandList->appendSignalEvent(event.toHandle());
+    size_t usedBefore = commandContainer.getCommandStream()->getUsed();
+    returnValue = commandList->appendBarrier(nullptr, 0, nullptr);
+    EXPECT_EQ(returnValue, ZE_RESULT_SUCCESS);
     GenCmdList cmdList;
     ASSERT_TRUE(FamilyType::PARSE::parseCommandBuffer(
-        cmdList, ptrOffset(commandContainer.getCommandStream()->getCpuBase(), 0), commandContainer.getCommandStream()->getUsed()));
-    auto itor = find<MI_FLUSH_DW *>(cmdList.begin(), cmdList.end());
-
-    EXPECT_NE(cmdList.end(), itor);
-}
-
-HWTEST_F(CommandListCreate, givenCommandListWhenAppendSignalEventThePipeControlIsProgrammed) {
-    using PIPE_CONTROL = typename FamilyType::PIPE_CONTROL;
-    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, false));
-    auto &commandContainer = commandList->commandContainer;
-    MockEvent event;
-    event.waitScope = ZE_EVENT_SCOPE_FLAG_NONE;
-    event.signalScope = ZE_EVENT_SCOPE_FLAG_NONE;
-    commandList->appendSignalEvent(event.toHandle());
-    GenCmdList cmdList;
-    ASSERT_TRUE(FamilyType::PARSE::parseCommandBuffer(
-        cmdList, ptrOffset(commandContainer.getCommandStream()->getCpuBase(), 0), commandContainer.getCommandStream()->getUsed()));
+        cmdList,
+        ptrOffset(commandContainer.getCommandStream()->getCpuBase(), usedBefore),
+        commandContainer.getCommandStream()->getUsed() - usedBefore));
     auto itor = find<PIPE_CONTROL *>(cmdList.begin(), cmdList.end());
-
     EXPECT_NE(cmdList.end(), itor);
+
+    auto pipeControlCmd = reinterpret_cast<typename FamilyType::PIPE_CONTROL *>(*itor);
+    EXPECT_TRUE(UnitTestHelper<FamilyType>::getPipeControlHdcPipelineFlush(*pipeControlCmd));
 }
 
-HWTEST_F(CommandListCreate, givenCommandListWithCopyOnlyWhenAppendWaitEventsWithDcFlushThenMiFlushDWIsProgrammed) {
-    using MI_FLUSH_DW = typename FamilyType::MI_FLUSH_DW;
-    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, true));
-    auto &commandContainer = commandList->commandContainer;
-    MockEvent event;
-    event.signalScope = ZE_EVENT_SCOPE_FLAG_NONE;
-    event.waitScope = ZE_EVENT_SCOPE_FLAG_HOST;
-    auto eventHandle = event.toHandle();
-    commandList->appendWaitOnEvents(1, &eventHandle);
-    GenCmdList cmdList;
-    ASSERT_TRUE(FamilyType::PARSE::parseCommandBuffer(
-        cmdList, ptrOffset(commandContainer.getCommandStream()->getCpuBase(), 0), commandContainer.getCommandStream()->getUsed()));
-    auto itor = find<MI_FLUSH_DW *>(cmdList.begin(), cmdList.end());
-
-    EXPECT_NE(cmdList.end(), itor);
-}
-
-HWTEST_F(CommandListCreate, givenCommandListyWhenAppendWaitEventsWithDcFlushThePipeControlIsProgrammed) {
+HWTEST2_F(CommandListCreate, givenCommandListWhenAppendingBarrierThenPipeControlIsProgrammedWithHdcAndUntypedFlushSet, IsAtLeastXeHpgCore) {
     using PIPE_CONTROL = typename FamilyType::PIPE_CONTROL;
-    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, false));
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, NEO::EngineGroupType::RenderCompute, 0u, returnValue));
     auto &commandContainer = commandList->commandContainer;
-    MockEvent event;
-    event.signalScope = ZE_EVENT_SCOPE_FLAG_NONE;
-    event.waitScope = ZE_EVENT_SCOPE_FLAG_HOST;
-    auto eventHandle = event.toHandle();
-    commandList->appendWaitOnEvents(1, &eventHandle);
+    size_t usedBefore = commandContainer.getCommandStream()->getUsed();
+    returnValue = commandList->appendBarrier(nullptr, 0, nullptr);
+    EXPECT_EQ(returnValue, ZE_RESULT_SUCCESS);
     GenCmdList cmdList;
     ASSERT_TRUE(FamilyType::PARSE::parseCommandBuffer(
-        cmdList, ptrOffset(commandContainer.getCommandStream()->getCpuBase(), 0), commandContainer.getCommandStream()->getUsed()));
+        cmdList,
+        ptrOffset(commandContainer.getCommandStream()->getCpuBase(), usedBefore),
+        commandContainer.getCommandStream()->getUsed() - usedBefore));
     auto itor = find<PIPE_CONTROL *>(cmdList.begin(), cmdList.end());
-
     EXPECT_NE(cmdList.end(), itor);
+
+    auto pipeControlCmd = reinterpret_cast<typename FamilyType::PIPE_CONTROL *>(*itor);
+    EXPECT_TRUE(UnitTestHelper<FamilyType>::getPipeControlHdcPipelineFlush(*pipeControlCmd));
+    EXPECT_TRUE(pipeControlCmd->getUnTypedDataPortCacheFlush());
 }
 
-template <GFXCORE_FAMILY gfxCoreFamily>
-class MockCommandListForMemFill : public WhiteBox<::L0::CommandListCoreFamily<gfxCoreFamily>> {
-  public:
-    MockCommandListForMemFill() : WhiteBox<::L0::CommandListCoreFamily<gfxCoreFamily>>() {}
-
-    AlignedAllocationData getAlignedAllocation(L0::Device *device, const void *buffer, uint64_t bufferSize) override {
-        return {0, 0, nullptr, true};
-    }
-    ze_result_t appendMemoryCopyBlit(uintptr_t dstPtr,
-                                     NEO::GraphicsAllocation *dstPtrAlloc,
-                                     uint64_t dstOffset, uintptr_t srcPtr,
-                                     NEO::GraphicsAllocation *srcPtrAlloc,
-                                     uint64_t srcOffset,
-                                     uint32_t size,
-                                     ze_event_handle_t hSignalEvent) override {
-        appendMemoryCopyBlitCalledTimes++;
-        return ZE_RESULT_SUCCESS;
-    }
-    uint32_t appendMemoryCopyBlitCalledTimes = 0;
-};
-class MockDriverHandle : public L0::DriverHandleImp {
-  public:
-    bool findAllocationDataForRange(const void *buffer,
-                                    size_t size,
-                                    NEO::SvmAllocationData **allocData) override {
-        mockAllocation.reset(new NEO::MockGraphicsAllocation(rootDeviceIndex, NEO::GraphicsAllocation::AllocationType::INTERNAL_HOST_MEMORY,
-                                                             reinterpret_cast<void *>(0x1234), 0x1000, 0, sizeof(uint32_t),
-                                                             MemoryPool::System4KBPages));
-        data.gpuAllocations.addAllocation(mockAllocation.get());
-        if (allocData) {
-            *allocData = &data;
-        }
-        return true;
-    }
-    const uint32_t rootDeviceIndex = 0u;
-    std::unique_ptr<NEO::GraphicsAllocation> mockAllocation;
-    NEO::SvmAllocationData data{rootDeviceIndex};
-};
-
-template <GFXCORE_FAMILY gfxCoreFamily>
-class MockCommandListForMemFillHostPtr : public WhiteBox<::L0::CommandListCoreFamily<gfxCoreFamily>> {
-  public:
-    MockCommandListForMemFillHostPtr() : WhiteBox<::L0::CommandListCoreFamily<gfxCoreFamily>>() {}
-
-    AlignedAllocationData getAlignedAllocation(L0::Device *device, const void *buffer, uint64_t bufferSize) override {
-        return L0::CommandListCoreFamily<gfxCoreFamily>::getAlignedAllocation(device, buffer, bufferSize);
-    }
-};
-
-struct AppendMemoryFillFixture {
-    class MockDriverHandleHostPtr : public L0::DriverHandleImp {
-      public:
-        bool findAllocationDataForRange(const void *buffer,
-                                        size_t size,
-                                        NEO::SvmAllocationData **allocData) override {
-            if (buffer == reinterpret_cast<void *>(registeredGraphicsAllocationAddress)) {
-                mockAllocation.reset(new NEO::MockGraphicsAllocation(rootDeviceIndex, NEO::GraphicsAllocation::AllocationType::INTERNAL_HOST_MEMORY,
-                                                                     reinterpret_cast<void *>(registeredGraphicsAllocationAddress), 0x1000, 0, sizeof(uint32_t),
-                                                                     MemoryPool::System4KBPages));
-                data.gpuAllocations.addAllocation(mockAllocation.get());
-                if (allocData) {
-                    *allocData = &data;
-                }
-                return true;
-            }
-            return false;
-        }
-        const uint32_t rootDeviceIndex = 0u;
-        std::unique_ptr<NEO::GraphicsAllocation> mockAllocation;
-        NEO::SvmAllocationData data{rootDeviceIndex};
-    };
-    class MockKernelForMemFill : public L0::KernelImp {
-      public:
-        ze_result_t setGroupSize(uint32_t groupSizeX, uint32_t groupSizeY,
-                                 uint32_t groupSizeZ) override {
-            return ZE_RESULT_ERROR_UNKNOWN;
-        }
-        void setBufferSurfaceState(uint32_t argIndex, void *address, NEO::GraphicsAllocation *alloc) override {
-            return;
-        }
-        void evaluateIfRequiresGenerationOfLocalIdsByRuntime(const NEO::KernelDescriptor &kernelDescriptor) override {
-            return;
-        }
-        std::unique_ptr<Kernel> clone() const override { return nullptr; }
-    };
-
-    struct MockBuiltinFunctionsForMemFill : BuiltinFunctionsLibImpl {
-        MockBuiltinFunctionsForMemFill(L0::Device *device, NEO::BuiltIns *builtInsLib) : BuiltinFunctionsLibImpl(device, builtInsLib) {
-            tmpMockKernel = new MockKernelForMemFill;
-        }
-        MockKernelForMemFill *getFunction(Builtin func) override {
-            return tmpMockKernel;
-        }
-        ~MockBuiltinFunctionsForMemFill() override {
-            delete tmpMockKernel;
-        }
-        MockKernelForMemFill *tmpMockKernel = nullptr;
-    };
-    class MockDeviceHandle : public L0::DeviceImp {
-      public:
-        MockDeviceHandle() {
-            tmpMockBultinLib = new MockBuiltinFunctionsForMemFill{nullptr, nullptr};
-        }
-        MockBuiltinFunctionsForMemFill *getBuiltinFunctionsLib() override {
-            return tmpMockBultinLib;
-        }
-        ~MockDeviceHandle() override {
-            delete tmpMockBultinLib;
-        }
-        MockBuiltinFunctionsForMemFill *tmpMockBultinLib = nullptr;
-    };
-    virtual void SetUp() { // NOLINT(readability-identifier-naming)
-        neoDevice = NEO::MockDevice::createWithNewExecutionEnvironment<NEO::MockDevice>(NEO::defaultHwInfo.get());
-        neoMockDevice = NEO::MockDevice::createWithNewExecutionEnvironment<NEO::MockDevice>(NEO::defaultHwInfo.get());
-        NEO::DeviceVector devices;
-        devices.push_back(std::unique_ptr<NEO::Device>(neoDevice));
-        driverHandle = std::make_unique<Mock<L0::DriverHandleImp>>();
-        deviceMock = std::make_unique<MockDeviceHandle>();
-        driverHandle->initialize(std::move(devices));
-        neoMockDevice->incRefInternal();
-        deviceMock.get()->neoDevice = neoMockDevice;
-    }
-
-    virtual void TearDown() { // NOLINT(readability-identifier-naming)
-    }
-    std::unique_ptr<Mock<L0::DriverHandleImp>> driverHandle;
-    std::unique_ptr<MockDeviceHandle> deviceMock;
-    NEO::MockDevice *neoDevice = nullptr;
-    NEO::MockDevice *neoMockDevice = nullptr;
-    static constexpr uint64_t registeredGraphicsAllocationAddress = 0x1234;
-};
-
-using AppendMemoryfillHostPtr = Test<AppendMemoryFillFixture>;
-
-HWTEST2_F(AppendMemoryfillHostPtr, givenTwoCommandListsAndHostPointerUsedInBothWhenMemoryfillCalledThenNewUniqueAllocationIsAddedtoHostPtrMap, Platforms) {
-    MockCommandListForMemFillHostPtr<gfxCoreFamily> cmdListFirst;
-    MockCommandListForMemFillHostPtr<gfxCoreFamily> cmdListSecond;
-    MockDriverHandleHostPtr driverHandleMock;
-    deviceMock.get()->setDriverHandle(&driverHandleMock);
-    cmdListFirst.initialize(deviceMock.get(), false);
-    cmdListSecond.initialize(deviceMock.get(), false);
-    uint64_t pattern[4] = {1, 2, 3, 4};
-    void *ptr = reinterpret_cast<void *>(registeredGraphicsAllocationAddress);
-    cmdListFirst.appendMemoryFill(ptr, reinterpret_cast<void *>(&pattern), sizeof(pattern), 0x1000, nullptr);
-    cmdListSecond.appendMemoryFill(ptr, reinterpret_cast<void *>(&pattern), sizeof(pattern), 0x1000, nullptr);
-    EXPECT_EQ(cmdListFirst.hostPtrMap.size(), 1u);
-    EXPECT_EQ(cmdListSecond.hostPtrMap.size(), 1u);
-    auto allocationFirstList = cmdListFirst.hostPtrMap.begin()->second;
-    auto allocationSecondList = cmdListSecond.hostPtrMap.begin()->second;
-    EXPECT_NE(allocationFirstList, allocationSecondList);
-    deviceMock.get()->setDriverHandle(driverHandle.get());
+HWTEST_F(CommandListCreate, givenCommandListWhenAppendingBarrierWithIncorrectWaitEventsThenInvalidArgumentIsReturned) {
+    ze_result_t returnValue;
+    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, NEO::EngineGroupType::RenderCompute, 0u, returnValue));
+    returnValue = commandList->appendBarrier(nullptr, 4u, nullptr);
+    EXPECT_EQ(returnValue, ZE_RESULT_ERROR_INVALID_ARGUMENT);
 }
 
-HWTEST2_F(AppendMemoryfillHostPtr, givenCommandListAndHostPointerWhenMemoryfillCalledThenNewAllocationisAddedToHostPtrMap, Platforms) {
-    MockCommandListForMemFillHostPtr<gfxCoreFamily> cmdList;
-    MockDriverHandleHostPtr driverHandleMock;
-    deviceMock.get()->setDriverHandle(&driverHandleMock);
-    cmdList.initialize(deviceMock.get(), false);
-    uint64_t pattern[4] = {1, 2, 3, 4};
-    void *ptr = reinterpret_cast<void *>(registeredGraphicsAllocationAddress);
-    cmdList.appendMemoryFill(ptr, reinterpret_cast<void *>(&pattern), sizeof(pattern), 0x1000, nullptr);
-    EXPECT_EQ(cmdList.hostPtrMap.size(), 1u);
-    deviceMock.get()->setDriverHandle(driverHandle.get());
-}
-
-HWTEST2_F(CommandListCreate, givenCopyOnlyCommandListWhenAppenBlitFillCalledWithLargePatternSizeThenMemCopyWasCalled, Platforms) {
-    MockCommandListForMemFill<gfxCoreFamily> cmdList;
-    cmdList.initialize(device, true);
-    uint64_t pattern[4] = {1, 2, 3, 4};
-    void *ptr = reinterpret_cast<void *>(0x1234);
-    cmdList.appendMemoryFill(ptr, reinterpret_cast<void *>(&pattern), sizeof(pattern), 0x1000, nullptr);
-    EXPECT_GT(cmdList.appendMemoryCopyBlitCalledTimes, 0u);
-}
-
-HWTEST2_F(CommandListCreate, givenCopyOnlyCommandListWhenAppenBlitFillToNotDeviceMemThenInvalidArgumentReturned, Platforms) {
-    MockCommandListForMemFill<gfxCoreFamily> cmdList;
-    cmdList.initialize(device, true);
-    uint8_t pattern = 1;
-    void *ptr = reinterpret_cast<void *>(0x1234);
-    auto ret = cmdList.appendMemoryFill(ptr, reinterpret_cast<void *>(&pattern), sizeof(pattern), 0x1000, nullptr);
-    EXPECT_EQ(ret, ZE_RESULT_ERROR_INVALID_ARGUMENT);
-}
-
-HWTEST2_F(CommandListCreate, givenCopyOnlyCommandListWhenAppenBlitFillThenCopyBltIsProgrammed, Platforms) {
-    using GfxFamily = typename NEO::GfxFamilyMapper<gfxCoreFamily>::GfxFamily;
-    using XY_COLOR_BLT = typename GfxFamily::XY_COLOR_BLT;
-    MockCommandListForMemFill<gfxCoreFamily> commandList;
-    MockDriverHandle driverHandleMock;
-    device->setDriverHandle(&driverHandleMock);
-    commandList.initialize(device, true);
-    uint16_t pattern = 1;
-    void *ptr = reinterpret_cast<void *>(0x1234);
-    commandList.appendMemoryFill(ptr, reinterpret_cast<void *>(&pattern), sizeof(pattern), 0x1000, nullptr);
-    GenCmdList cmdList;
-    ASSERT_TRUE(FamilyType::PARSE::parseCommandBuffer(
-        cmdList, ptrOffset(commandList.commandContainer.getCommandStream()->getCpuBase(), 0), commandList.commandContainer.getCommandStream()->getUsed()));
-    auto itor = find<XY_COLOR_BLT *>(cmdList.begin(), cmdList.end());
-    EXPECT_NE(cmdList.end(), itor);
-    device->setDriverHandle(driverHandle.get());
-}
-
-using ImageSupport = IsWithinProducts<IGFX_SKYLAKE, IGFX_TIGERLAKE_LP>;
-
-HWTEST2_F(CommandListCreate, givenCopyCommandListWhenCopyFromImagBlitThenCommandAddedToStream, ImageSupport) {
-    using GfxFamily = typename NEO::GfxFamilyMapper<gfxCoreFamily>::GfxFamily;
-    using XY_COPY_BLT = typename GfxFamily::XY_COPY_BLT;
-    std::unique_ptr<L0::CommandList> commandList(CommandList::create(productFamily, device, true));
-    ze_image_desc_t zeDesc = {};
-    auto imageHWSrc = std::make_unique<WhiteBox<::L0::ImageCoreFamily<gfxCoreFamily>>>();
-    auto imageHWDst = std::make_unique<WhiteBox<::L0::ImageCoreFamily<gfxCoreFamily>>>();
-    imageHWSrc->initialize(device, &zeDesc);
-    imageHWDst->initialize(device, &zeDesc);
-
-    commandList->appendImageCopyRegion(imageHWDst->toHandle(), imageHWSrc->toHandle(), nullptr, nullptr, nullptr, 0, nullptr);
-    GenCmdList cmdList;
-    ASSERT_TRUE(FamilyType::PARSE::parseCommandBuffer(
-        cmdList, ptrOffset(commandList->commandContainer.getCommandStream()->getCpuBase(), 0), commandList->commandContainer.getCommandStream()->getUsed()));
-    auto itor = find<XY_COPY_BLT *>(cmdList.begin(), cmdList.end());
-    EXPECT_NE(cmdList.end(), itor);
-}
-
-HWTEST2_F(CommandListCreate, givenCopyCommandListWhenTimestampPassedToMemoryCopyRegionBlitThenTimeStampRegistersAreAdded, Platforms) {
+HWTEST2_F(CommandListCreate, givenCopyCommandListWhenProfilingBeforeCommandForCopyOnlyThenCommandsHaveCorrectEventOffsets, IsAtLeastSkl) {
     using GfxFamily = typename NEO::GfxFamilyMapper<gfxCoreFamily>::GfxFamily;
     using MI_STORE_REGISTER_MEM = typename GfxFamily::MI_STORE_REGISTER_MEM;
     auto commandList = std::make_unique<WhiteBox<::L0::CommandListCoreFamily<gfxCoreFamily>>>();
-    commandList->initialize(device, true);
-    ze_event_pool_desc_t eventPoolDesc = {
-        ZE_EVENT_POOL_DESC_VERSION_CURRENT,
-        ZE_EVENT_POOL_FLAG_TIMESTAMP,
-        1};
-    ze_event_desc_t eventDesc = {
-        ZE_EVENT_DESC_VERSION_CURRENT,
-        0,
-        ZE_EVENT_SCOPE_FLAG_NONE,
-        ZE_EVENT_SCOPE_FLAG_NONE};
-    auto eventPool = std::unique_ptr<L0::EventPool>(L0::EventPool::create(driverHandle.get(), 0, nullptr, &eventPoolDesc));
-    auto event = std::unique_ptr<L0::Event>(L0::Event::create(eventPool.get(), &eventDesc, device));
+    commandList->initialize(device, NEO::EngineGroupType::Copy, 0u);
+    ze_event_pool_desc_t eventPoolDesc = {};
+    eventPoolDesc.count = 1;
+    eventPoolDesc.flags = ZE_EVENT_POOL_FLAG_KERNEL_TIMESTAMP;
 
-    ze_copy_region_t srcRegion = {4, 4, 4, 2, 2, 2};
-    ze_copy_region_t dstRegion = {4, 4, 4, 2, 2, 2};
-    NEO::MockGraphicsAllocation mockAllocationSrc(0, NEO::GraphicsAllocation::AllocationType::INTERNAL_HOST_MEMORY,
-                                                  reinterpret_cast<void *>(0x1234), 0x1000, 0, sizeof(uint32_t),
-                                                  MemoryPool::System4KBPages);
-    NEO::MockGraphicsAllocation mockAllocationDst(0, NEO::GraphicsAllocation::AllocationType::INTERNAL_HOST_MEMORY,
-                                                  reinterpret_cast<void *>(0x1234), 0x1000, 0, sizeof(uint32_t),
-                                                  MemoryPool::System4KBPages);
+    ze_event_desc_t eventDesc = {};
+    eventDesc.index = 0;
+    ze_result_t result = ZE_RESULT_SUCCESS;
+    auto eventPool = std::unique_ptr<L0::EventPool>(L0::EventPool::create(driverHandle.get(), context, 0, nullptr, &eventPoolDesc, result));
+    EXPECT_EQ(ZE_RESULT_SUCCESS, result);
+    auto event = std::unique_ptr<L0::Event>(L0::Event::create<uint32_t>(eventPool.get(), &eventDesc, device));
 
-    commandList->appendMemoryCopyBlitRegion(&mockAllocationDst, &mockAllocationSrc, srcRegion, dstRegion, {0, 0, 0}, 0, 0, 0, 0, 0, 0, event->toHandle());
-    GenCmdList cmdList;
-
-    auto baseAddr = event->getGpuAddress();
-    auto contextStartOffset = offsetof(KernelTimestampEvent, contextStart);
-    auto globalStartOffset = offsetof(KernelTimestampEvent, globalStart);
-    auto contextEndOffset = offsetof(KernelTimestampEvent, contextEnd);
-    auto globalEndOffset = offsetof(KernelTimestampEvent, globalEnd);
-
-    ASSERT_TRUE(FamilyType::PARSE::parseCommandBuffer(
-        cmdList, ptrOffset(commandList->commandContainer.getCommandStream()->getCpuBase(), 0), commandList->commandContainer.getCommandStream()->getUsed()));
-    auto itor = find<MI_STORE_REGISTER_MEM *>(cmdList.begin(), cmdList.end());
-    EXPECT_NE(cmdList.end(), itor);
-    auto cmd = genCmdCast<MI_STORE_REGISTER_MEM *>(*itor);
-    EXPECT_EQ(cmd->getRegisterAddress(), REG_GLOBAL_TIMESTAMP_LDW);
-    EXPECT_EQ(cmd->getMemoryAddress(), ptrOffset(baseAddr, globalStartOffset));
-    itor++;
-    EXPECT_NE(cmdList.end(), itor);
-    cmd = genCmdCast<MI_STORE_REGISTER_MEM *>(*itor);
-    EXPECT_EQ(cmd->getRegisterAddress(), GP_THREAD_TIME_REG_ADDRESS_OFFSET_LOW);
-    EXPECT_EQ(cmd->getMemoryAddress(), ptrOffset(baseAddr, contextStartOffset));
-    itor++;
-    itor = find<MI_STORE_REGISTER_MEM *>(itor, cmdList.end());
-    EXPECT_NE(cmdList.end(), itor);
-    cmd = genCmdCast<MI_STORE_REGISTER_MEM *>(*itor);
-    EXPECT_EQ(cmd->getRegisterAddress(), REG_GLOBAL_TIMESTAMP_LDW);
-    EXPECT_EQ(cmd->getMemoryAddress(), ptrOffset(baseAddr, globalEndOffset));
-    itor++;
-    EXPECT_NE(cmdList.end(), itor);
-    cmd = genCmdCast<MI_STORE_REGISTER_MEM *>(*itor);
-    EXPECT_EQ(cmd->getRegisterAddress(), GP_THREAD_TIME_REG_ADDRESS_OFFSET_LOW);
-    EXPECT_EQ(cmd->getMemoryAddress(), ptrOffset(baseAddr, contextEndOffset));
-    itor++;
-    EXPECT_EQ(cmdList.end(), itor);
-}
-
-HWTEST2_F(CommandListCreate, givenCopyCommandListWhenTimestampPassedToImageCopyBlitThenTimeStampRegistersAreAdded, Platforms) {
-    using GfxFamily = typename NEO::GfxFamilyMapper<gfxCoreFamily>::GfxFamily;
-    using MI_STORE_REGISTER_MEM = typename GfxFamily::MI_STORE_REGISTER_MEM;
-    auto commandList = std::make_unique<WhiteBox<::L0::CommandListCoreFamily<gfxCoreFamily>>>();
-    commandList->initialize(device, true);
-    ze_event_pool_desc_t eventPoolDesc = {
-        ZE_EVENT_POOL_DESC_VERSION_CURRENT,
-        ZE_EVENT_POOL_FLAG_TIMESTAMP,
-        1};
-    ze_event_desc_t eventDesc = {
-        ZE_EVENT_DESC_VERSION_CURRENT,
-        0,
-        ZE_EVENT_SCOPE_FLAG_NONE,
-        ZE_EVENT_SCOPE_FLAG_NONE};
-    auto eventPool = std::unique_ptr<L0::EventPool>(L0::EventPool::create(driverHandle.get(), 0, nullptr, &eventPoolDesc));
-    auto event = std::unique_ptr<L0::Event>(L0::Event::create(eventPool.get(), &eventDesc, device));
-
-    NEO::MockGraphicsAllocation mockAllocationSrc(0, NEO::GraphicsAllocation::AllocationType::INTERNAL_HOST_MEMORY,
-                                                  reinterpret_cast<void *>(0x1234), 0x1000, 0, sizeof(uint32_t),
-                                                  MemoryPool::System4KBPages);
-    NEO::MockGraphicsAllocation mockAllocationDst(0, NEO::GraphicsAllocation::AllocationType::INTERNAL_HOST_MEMORY,
-                                                  reinterpret_cast<void *>(0x1234), 0x1000, 0, sizeof(uint32_t),
-                                                  MemoryPool::System4KBPages);
-
-    commandList->appendCopyImageBlit(&mockAllocationDst, &mockAllocationSrc, {0, 0, 0}, {0, 0, 0}, 0, 0, 0, 0, 1, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, event->toHandle());
-    GenCmdList cmdList;
-    ASSERT_TRUE(FamilyType::PARSE::parseCommandBuffer(
-        cmdList, ptrOffset(commandList->commandContainer.getCommandStream()->getCpuBase(), 0), commandList->commandContainer.getCommandStream()->getUsed()));
-    auto itor = find<MI_STORE_REGISTER_MEM *>(cmdList.begin(), cmdList.end());
-    EXPECT_NE(cmdList.end(), itor);
-    auto cmd = genCmdCast<MI_STORE_REGISTER_MEM *>(*itor);
-    EXPECT_EQ(cmd->getRegisterAddress(), REG_GLOBAL_TIMESTAMP_LDW);
-}
-
-HWTEST2_F(CommandListCreate, givenCopyCommandListWhenProfilingBeforeCommandForCopyOnlyThenCommandsHaveCorrectEventOffsets, Platforms) {
-    using GfxFamily = typename NEO::GfxFamilyMapper<gfxCoreFamily>::GfxFamily;
-    using MI_STORE_REGISTER_MEM = typename GfxFamily::MI_STORE_REGISTER_MEM;
-    auto commandList = std::make_unique<WhiteBox<::L0::CommandListCoreFamily<gfxCoreFamily>>>();
-    commandList->initialize(device, true);
-    ze_event_pool_desc_t eventPoolDesc = {
-        ZE_EVENT_POOL_DESC_VERSION_CURRENT,
-        ZE_EVENT_POOL_FLAG_TIMESTAMP,
-        1};
-    ze_event_desc_t eventDesc = {
-        ZE_EVENT_DESC_VERSION_CURRENT,
-        0,
-        ZE_EVENT_SCOPE_FLAG_NONE,
-        ZE_EVENT_SCOPE_FLAG_NONE};
-    auto eventPool = std::unique_ptr<L0::EventPool>(L0::EventPool::create(driverHandle.get(), 0, nullptr, &eventPoolDesc));
-    auto event = std::unique_ptr<L0::Event>(L0::Event::create(eventPool.get(), &eventDesc, device));
+    auto baseAddr = event->getGpuAddress(device);
+    auto contextOffset = event->getContextStartOffset();
+    auto globalOffset = event->getGlobalStartOffset();
+    EXPECT_EQ(baseAddr, event->getPacketAddress(device));
 
     commandList->appendEventForProfilingCopyCommand(event->toHandle(), true);
+    EXPECT_EQ(1u, event->getPacketsInUse());
 
-    auto contextOffset = offsetof(KernelTimestampEvent, contextStart);
-    auto globalOffset = offsetof(KernelTimestampEvent, globalStart);
-    auto baseAddr = event->getGpuAddress();
     GenCmdList cmdList;
     ASSERT_TRUE(FamilyType::PARSE::parseCommandBuffer(
         cmdList, ptrOffset(commandList->commandContainer.getCommandStream()->getCpuBase(), 0), commandList->commandContainer.getCommandStream()->getUsed()));
@@ -757,28 +1584,27 @@ HWTEST2_F(CommandListCreate, givenCopyCommandListWhenProfilingBeforeCommandForCo
     EXPECT_EQ(cmd->getMemoryAddress(), ptrOffset(baseAddr, contextOffset));
 }
 
-HWTEST2_F(CommandListCreate, givenCopyCommandListWhenProfilingAfterCommandForCopyOnlyThenCommandsHaveCorrectEventOffsets, Platforms) {
+HWTEST2_F(CommandListCreate, givenCopyCommandListWhenProfilingAfterCommandForCopyOnlyThenCommandsHaveCorrectEventOffsets, IsAtLeastSkl) {
     using GfxFamily = typename NEO::GfxFamilyMapper<gfxCoreFamily>::GfxFamily;
     using MI_STORE_REGISTER_MEM = typename GfxFamily::MI_STORE_REGISTER_MEM;
     auto commandList = std::make_unique<WhiteBox<::L0::CommandListCoreFamily<gfxCoreFamily>>>();
-    commandList->initialize(device, true);
-    ze_event_pool_desc_t eventPoolDesc = {
-        ZE_EVENT_POOL_DESC_VERSION_CURRENT,
-        ZE_EVENT_POOL_FLAG_TIMESTAMP,
-        1};
-    ze_event_desc_t eventDesc = {
-        ZE_EVENT_DESC_VERSION_CURRENT,
-        0,
-        ZE_EVENT_SCOPE_FLAG_NONE,
-        ZE_EVENT_SCOPE_FLAG_NONE};
-    auto eventPool = std::unique_ptr<L0::EventPool>(L0::EventPool::create(driverHandle.get(), 0, nullptr, &eventPoolDesc));
-    auto event = std::unique_ptr<L0::Event>(L0::Event::create(eventPool.get(), &eventDesc, device));
+    commandList->initialize(device, NEO::EngineGroupType::Copy, 0u);
+    ze_event_pool_desc_t eventPoolDesc = {};
+    eventPoolDesc.count = 1;
+    eventPoolDesc.flags = ZE_EVENT_POOL_FLAG_KERNEL_TIMESTAMP;
+
+    ze_event_desc_t eventDesc = {};
+    eventDesc.index = 0;
+    ze_result_t result = ZE_RESULT_SUCCESS;
+    auto eventPool = std::unique_ptr<L0::EventPool>(L0::EventPool::create(driverHandle.get(), context, 0, nullptr, &eventPoolDesc, result));
+    EXPECT_EQ(ZE_RESULT_SUCCESS, result);
+    auto event = std::unique_ptr<L0::Event>(L0::Event::create<uint32_t>(eventPool.get(), &eventDesc, device));
 
     commandList->appendEventForProfilingCopyCommand(event->toHandle(), false);
 
-    auto contextOffset = offsetof(KernelTimestampEvent, contextEnd);
-    auto globalOffset = offsetof(KernelTimestampEvent, globalEnd);
-    auto baseAddr = event->getGpuAddress();
+    auto contextOffset = event->getContextEndOffset();
+    auto globalOffset = event->getGlobalEndOffset();
+    auto baseAddr = event->getGpuAddress(device);
     GenCmdList cmdList;
     ASSERT_TRUE(FamilyType::PARSE::parseCommandBuffer(
         cmdList, ptrOffset(commandList->commandContainer.getCommandStream()->getCpuBase(), 0), commandList->commandContainer.getCommandStream()->getUsed()));
@@ -793,11 +1619,11 @@ HWTEST2_F(CommandListCreate, givenCopyCommandListWhenProfilingAfterCommandForCop
     EXPECT_EQ(cmd->getMemoryAddress(), ptrOffset(baseAddr, contextOffset));
 }
 
-HWTEST2_F(CommandListCreate, givenNullEventWhenAppendEventAfterWalkerThenNothingAddedToStream, Platforms) {
+HWTEST2_F(CommandListCreate, givenNullEventWhenAppendEventAfterWalkerThenNothingAddedToStream, IsAtLeastSkl) {
     using GfxFamily = typename NEO::GfxFamilyMapper<gfxCoreFamily>::GfxFamily;
     using MI_STORE_REGISTER_MEM = typename GfxFamily::MI_STORE_REGISTER_MEM;
     auto commandList = std::make_unique<WhiteBox<::L0::CommandListCoreFamily<gfxCoreFamily>>>();
-    commandList->initialize(device, true);
+    commandList->initialize(device, NEO::EngineGroupType::Copy, 0u);
 
     auto usedBefore = commandList->commandContainer.getCommandStream()->getUsed();
 
@@ -805,162 +1631,6 @@ HWTEST2_F(CommandListCreate, givenNullEventWhenAppendEventAfterWalkerThenNothing
 
     EXPECT_EQ(commandList->commandContainer.getCommandStream()->getUsed(), usedBefore);
 }
-HWTEST2_F(CommandListCreate, givenCopyOnlyCommandListWhenAppendBlitFillCalledWithLargePatternSizeThenInternalAllocHasPattern, Platforms) {
-    MockCommandListForMemFill<gfxCoreFamily> cmdList;
-    cmdList.initialize(device, true);
-    uint64_t pattern[4] = {1, 2, 3, 4};
-    void *ptr = reinterpret_cast<void *>(0x1234);
-    uint32_t fillElements = 0x101;
-    auto size = fillElements * sizeof(uint64_t);
-    cmdList.appendMemoryFill(ptr, reinterpret_cast<void *>(&pattern), sizeof(pattern), size, nullptr);
-    auto internalAlloc = cmdList.commandContainer.getDeallocationContainer()[0];
-    for (uint32_t i = 0; i < fillElements; i++) {
-        auto allocValue = reinterpret_cast<uint64_t *>(internalAlloc->getUnderlyingBuffer())[i];
-        EXPECT_EQ(allocValue, pattern[i % 4]);
-    }
-}
 
-HWTEST2_F(CommandListCreate, givenHostAllocInMapWhenGettingAllocInRangeThenAllocFromMapReturned, Platforms) {
-    auto commandList = std::make_unique<WhiteBox<::L0::CommandListCoreFamily<gfxCoreFamily>>>();
-    commandList->initialize(device, true);
-    uint64_t gpuAddress = 0x1200;
-    const void *cpuPtr = reinterpret_cast<const void *>(gpuAddress);
-    size_t allocSize = 0x1000;
-    NEO::MockGraphicsAllocation alloc(const_cast<void *>(cpuPtr), gpuAddress, allocSize);
-    commandList->hostPtrMap.insert(std::make_pair(cpuPtr, &alloc));
-
-    auto newBufferPtr = ptrOffset(cpuPtr, 0x10);
-    auto newBufferSize = allocSize - 0x20;
-    auto newAlloc = commandList->getAllocationFromHostPtrMap(newBufferPtr, newBufferSize);
-    EXPECT_NE(newAlloc, nullptr);
-    commandList->hostPtrMap.clear();
-}
-
-HWTEST2_F(CommandListCreate, givenHostAllocInMapWhenSizeIsOutOfRangeThenNullPtrReturned, Platforms) {
-    auto commandList = std::make_unique<WhiteBox<::L0::CommandListCoreFamily<gfxCoreFamily>>>();
-    commandList->initialize(device, true);
-    uint64_t gpuAddress = 0x1200;
-    const void *cpuPtr = reinterpret_cast<const void *>(gpuAddress);
-    size_t allocSize = 0x1000;
-    NEO::MockGraphicsAllocation alloc(const_cast<void *>(cpuPtr), gpuAddress, allocSize);
-    commandList->hostPtrMap.insert(std::make_pair(cpuPtr, &alloc));
-
-    auto newBufferPtr = ptrOffset(cpuPtr, 0x10);
-    auto newBufferSize = allocSize + 0x20;
-    auto newAlloc = commandList->getAllocationFromHostPtrMap(newBufferPtr, newBufferSize);
-    EXPECT_EQ(newAlloc, nullptr);
-    commandList->hostPtrMap.clear();
-}
-
-HWTEST2_F(CommandListCreate, givenHostAllocInMapWhenPtrIsOutOfRangeThenNullPtrReturned, Platforms) {
-    auto commandList = std::make_unique<WhiteBox<::L0::CommandListCoreFamily<gfxCoreFamily>>>();
-    commandList->initialize(device, true);
-    uint64_t gpuAddress = 0x1200;
-    const void *cpuPtr = reinterpret_cast<const void *>(gpuAddress);
-    size_t allocSize = 0x1000;
-    NEO::MockGraphicsAllocation alloc(const_cast<void *>(cpuPtr), gpuAddress, allocSize);
-    commandList->hostPtrMap.insert(std::make_pair(cpuPtr, &alloc));
-
-    auto newBufferPtr = reinterpret_cast<const void *>(gpuAddress - 0x100);
-    auto newBufferSize = allocSize - 0x200;
-    auto newAlloc = commandList->getAllocationFromHostPtrMap(newBufferPtr, newBufferSize);
-    EXPECT_EQ(newAlloc, nullptr);
-    commandList->hostPtrMap.clear();
-}
-
-HWTEST2_F(CommandListCreate, givenHostAllocInMapWhenGetHostPtrAllocCalledThenCorrectOffsetIsSet, Platforms) {
-    auto commandList = std::make_unique<WhiteBox<::L0::CommandListCoreFamily<gfxCoreFamily>>>();
-    commandList->initialize(device, true);
-    uint64_t gpuAddress = 0x1200;
-    const void *cpuPtr = reinterpret_cast<const void *>(gpuAddress);
-    size_t allocSize = 0x1000;
-    NEO::MockGraphicsAllocation alloc(const_cast<void *>(cpuPtr), gpuAddress, allocSize);
-    commandList->hostPtrMap.insert(std::make_pair(cpuPtr, &alloc));
-    size_t expectedOffset = 0x10;
-    auto newBufferPtr = ptrOffset(cpuPtr, expectedOffset);
-    auto newBufferSize = allocSize - 0x20;
-    size_t offset = 0;
-    auto newAlloc = commandList->getHostPtrAlloc(newBufferPtr, newBufferSize, &offset);
-    EXPECT_NE(newAlloc, nullptr);
-    EXPECT_EQ(offset, expectedOffset);
-    commandList->hostPtrMap.clear();
-}
-
-HWTEST2_F(CommandListCreate, givenHostAllocInMapWhenPtrIsInMapThenAllocationReturned, Platforms) {
-    auto commandList = std::make_unique<WhiteBox<::L0::CommandListCoreFamily<gfxCoreFamily>>>();
-    commandList->initialize(device, true);
-    uint64_t gpuAddress = 0x1200;
-    const void *cpuPtr = reinterpret_cast<const void *>(gpuAddress);
-    size_t allocSize = 0x1000;
-    NEO::MockGraphicsAllocation alloc(const_cast<void *>(cpuPtr), gpuAddress, allocSize);
-    commandList->hostPtrMap.insert(std::make_pair(cpuPtr, &alloc));
-
-    auto newBufferPtr = cpuPtr;
-    auto newBufferSize = allocSize - 0x20;
-    auto newAlloc = commandList->getAllocationFromHostPtrMap(newBufferPtr, newBufferSize);
-    EXPECT_EQ(newAlloc, &alloc);
-    commandList->hostPtrMap.clear();
-}
-HWTEST2_F(CommandListCreate, givenHostAllocInMapWhenPtrIsInMapButWithBiggerSizeThenNullPtrReturned, Platforms) {
-    auto commandList = std::make_unique<WhiteBox<::L0::CommandListCoreFamily<gfxCoreFamily>>>();
-    commandList->initialize(device, true);
-    uint64_t gpuAddress = 0x1200;
-    const void *cpuPtr = reinterpret_cast<const void *>(gpuAddress);
-    size_t allocSize = 0x1000;
-    NEO::MockGraphicsAllocation alloc(const_cast<void *>(cpuPtr), gpuAddress, allocSize);
-    commandList->hostPtrMap.insert(std::make_pair(cpuPtr, &alloc));
-
-    auto newBufferPtr = cpuPtr;
-    auto newBufferSize = allocSize + 0x20;
-    auto newAlloc = commandList->getAllocationFromHostPtrMap(newBufferPtr, newBufferSize);
-    EXPECT_EQ(newAlloc, nullptr);
-    commandList->hostPtrMap.clear();
-}
-HWTEST2_F(CommandListCreate, givenHostAllocInMapWhenPtrLowerThanAnyInMapThenNullPtrReturned, Platforms) {
-    auto commandList = std::make_unique<WhiteBox<::L0::CommandListCoreFamily<gfxCoreFamily>>>();
-    commandList->initialize(device, true);
-    uint64_t gpuAddress = 0x1200;
-    const void *cpuPtr = reinterpret_cast<const void *>(gpuAddress);
-    size_t allocSize = 0x1000;
-    NEO::MockGraphicsAllocation alloc(const_cast<void *>(cpuPtr), gpuAddress, allocSize);
-    commandList->hostPtrMap.insert(std::make_pair(cpuPtr, &alloc));
-
-    auto newBufferPtr = reinterpret_cast<const void *>(gpuAddress - 0x10);
-    auto newBufferSize = allocSize - 0x20;
-    auto newAlloc = commandList->getAllocationFromHostPtrMap(newBufferPtr, newBufferSize);
-    EXPECT_EQ(newAlloc, nullptr);
-    commandList->hostPtrMap.clear();
-}
-
-HWTEST2_F(AppendMemoryCopy, givenCopyOnlyCommandListWhenWithDcFlushAddedIsNotAddedAfterBlitCopy, Platforms) {
-    using PIPE_CONTROL = typename FamilyType::PIPE_CONTROL;
-    using GfxFamily = typename NEO::GfxFamilyMapper<gfxCoreFamily>::GfxFamily;
-    using XY_COPY_BLT = typename GfxFamily::XY_COPY_BLT;
-
-    auto commandList = std::make_unique<WhiteBox<::L0::CommandListCoreFamily<gfxCoreFamily>>>();
-    commandList->initialize(device, true);
-    uintptr_t srcPtr = 0x5001;
-    uintptr_t dstPtr = 0x7001;
-    uint64_t srcOffset = 0x101;
-    uint64_t dstOffset = 0x201;
-    uint32_t copySize = 0x301;
-    NEO::MockGraphicsAllocation mockAllocationSrc(0, NEO::GraphicsAllocation::AllocationType::INTERNAL_HOST_MEMORY,
-                                                  reinterpret_cast<void *>(srcPtr), 0x1000, 0, sizeof(uint32_t),
-                                                  MemoryPool::System4KBPages);
-    NEO::MockGraphicsAllocation mockAllocationDst(0, NEO::GraphicsAllocation::AllocationType::INTERNAL_HOST_MEMORY,
-                                                  reinterpret_cast<void *>(dstPtr), 0x1000, 0, sizeof(uint32_t),
-                                                  MemoryPool::System4KBPages);
-    commandList->appendMemoryCopyBlit(ptrOffset(dstPtr, dstOffset), &mockAllocationDst, 0, ptrOffset(srcPtr, srcOffset), &mockAllocationSrc, 0, copySize, nullptr);
-
-    auto &commandContainer = commandList->commandContainer;
-    GenCmdList genCmdList;
-    ASSERT_TRUE(FamilyType::PARSE::parseCommandBuffer(
-        genCmdList, ptrOffset(commandContainer.getCommandStream()->getCpuBase(), 0), commandContainer.getCommandStream()->getUsed()));
-    auto itor = find<XY_COPY_BLT *>(genCmdList.begin(), genCmdList.end());
-    ASSERT_NE(genCmdList.end(), itor);
-    auto cmd = genCmdCast<XY_COPY_BLT *>(*itor);
-    EXPECT_EQ(cmd->getDestinationBaseAddress(), ptrOffset(dstPtr, dstOffset));
-    EXPECT_EQ(cmd->getSourceBaseAddress(), ptrOffset(srcPtr, srcOffset));
-}
 } // namespace ult
 } // namespace L0

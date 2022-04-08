@@ -1,16 +1,16 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
  */
 
 #include "shared/source/helpers/aligned_memory.h"
-#include "shared/test/unit_test/helpers/debug_manager_state_restore.h"
+#include "shared/test/common/fixtures/memory_management_fixture.h"
+#include "shared/test/common/helpers/debug_manager_state_restore.h"
 
 #include "opencl/source/mem_obj/buffer.h"
 #include "opencl/test/unit_test/fixtures/cl_device_fixture.h"
-#include "opencl/test/unit_test/fixtures/memory_management_fixture.h"
 #include "opencl/test/unit_test/mocks/mock_context.h"
 
 #include "gtest/gtest.h"
@@ -68,7 +68,7 @@ std::tuple<uint64_t , size_t, size_t, int, bool, bool> Inputs[] = {std::make_tup
                                                                            std::make_tuple((cl_mem_flags)NULL, 0, 0, CacheLinedAlignedSize, true, true)};
 // clang-format on
 
-TEST_P(ZeroCopyBufferTest, CheckCacheAlignedPointerResultsInZeroCopy) {
+TEST_P(ZeroCopyBufferTest, GivenCacheAlignedPointerWhenCreatingBufferThenZeroCopy) {
 
     char *PassedPtr = (char *)host_ptr;
     //misalign the pointer
@@ -192,7 +192,7 @@ TEST(ZeroCopyBufferWith32BitAddressing, GivenDeviceSupporting32BitAddressingWhen
     EXPECT_EQ(CL_SUCCESS, retVal);
 
     EXPECT_TRUE(buffer->isMemObjZeroCopy());
-    if (is64bit) {
+    if constexpr (is64bit) {
         EXPECT_TRUE(buffer->getGraphicsAllocation(context.getDevice(0)->getRootDeviceIndex())->is32BitAllocation());
     }
     alignedFree(host_ptr);

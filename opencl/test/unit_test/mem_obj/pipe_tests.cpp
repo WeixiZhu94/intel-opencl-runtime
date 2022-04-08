@@ -1,18 +1,19 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
  */
 
+#include "shared/test/common/fixtures/memory_management_fixture.h"
+#include "shared/test/common/test_macros/test.h"
+
 #include "opencl/source/command_queue/command_queue.h"
 #include "opencl/source/mem_obj/pipe.h"
 #include "opencl/test/unit_test/fixtures/cl_device_fixture.h"
-#include "opencl/test/unit_test/fixtures/memory_management_fixture.h"
 #include "opencl/test/unit_test/fixtures/multi_root_device_fixture.h"
 #include "opencl/test/unit_test/mocks/mock_command_queue.h"
 #include "opencl/test/unit_test/mocks/mock_context.h"
-#include "test.h"
 
 using namespace NEO;
 
@@ -116,7 +117,7 @@ TEST_F(PipeTest, givenPipeWithDifferentCpuAndGpuAddressesWhenSetArgPipeThenUseGp
 
 using MultiRootDeviceTests = MultiRootDeviceFixture;
 
-TEST_F(MultiRootDeviceTests, pipeGraphicsAllocationHasCorrectRootDeviceIndex) {
+TEST_F(MultiRootDeviceTests, GivenPipeGraphicsAllocationThenItHasCorrectRootDeviceIndex) {
     int errCode = CL_SUCCESS;
 
     std::unique_ptr<Pipe> pipe(Pipe::create(context.get(), CL_MEM_READ_ONLY, 1, 20, nullptr, errCode));

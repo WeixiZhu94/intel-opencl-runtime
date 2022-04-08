@@ -1,14 +1,15 @@
 /*
- * Copyright (C) 2020 Intel Corporation
+ * Copyright (C) 2020-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
  */
 
 #include "shared/source/command_stream/preemption.h"
-#include "shared/test/unit_test/cmd_parse/hw_parse.h"
-#include "shared/test/unit_test/mocks/mock_command_stream_receiver.h"
+#include "shared/test/common/cmd_parse/hw_parse.h"
+#include "shared/test/common/mocks/mock_command_stream_receiver.h"
 
+#include "opencl/source/helpers/cl_preemption_helper.h"
 #include "opencl/test/unit_test/command_queue/enqueue_fixture.h"
 #include "opencl/test/unit_test/fixtures/cl_preemption_fixture.h"
 #include "opencl/test/unit_test/mocks/mock_command_queue.h"
@@ -34,7 +35,7 @@ using Gen9ThreadGroupPreemptionEnqueueKernelTest = ThreadGroupPreemptionEnqueueK
 GEN9TEST_F(Gen9ThreadGroupPreemptionEnqueueKernelTest, givenSecondEnqueueWithTheSamePreemptionRequestThenDontReprogramThreadGroupNoWa) {
     pDevice->setPreemptionMode(PreemptionMode::ThreadGroup);
 
-    pDevice->getRootDeviceEnvironment().getMutableHardwareInfo()->workaroundTable.waModifyVFEStateAfterGPGPUPreemption = false;
+    pDevice->getRootDeviceEnvironment().getMutableHardwareInfo()->workaroundTable.flags.waModifyVFEStateAfterGPGPUPreemption = false;
     auto &csr = pDevice->getUltCommandStreamReceiver<FamilyType>();
     csr.getMemoryManager()->setForce32BitAllocations(false);
     csr.setMediaVFEStateDirty(false);
@@ -66,7 +67,7 @@ GEN9TEST_F(Gen9ThreadGroupPreemptionEnqueueKernelTest, givenSecondEnqueueWithThe
 GEN9TEST_F(Gen9ThreadGroupPreemptionEnqueueKernelTest, givenSecondEnqueueWithTheSamePreemptionRequestThenDontReprogramThreadGroupWa) {
     pDevice->setPreemptionMode(PreemptionMode::ThreadGroup);
 
-    pDevice->getRootDeviceEnvironment().getMutableHardwareInfo()->workaroundTable.waModifyVFEStateAfterGPGPUPreemption = true;
+    pDevice->getRootDeviceEnvironment().getMutableHardwareInfo()->workaroundTable.flags.waModifyVFEStateAfterGPGPUPreemption = true;
     auto &csr = pDevice->getUltCommandStreamReceiver<FamilyType>();
     csr.getMemoryManager()->setForce32BitAllocations(false);
     csr.setMediaVFEStateDirty(false);
@@ -155,12 +156,12 @@ GEN9TEST_F(Gen9ThreadGroupPreemptionEnqueueKernelTest, givenSecondEnqueueWithThe
 GEN9TEST_F(Gen9PreemptionEnqueueKernelTest, givenValidKernelForPreemptionWhenEnqueueKernelCalledThenPassDevicePreemptionModeThreadGroup) {
     pDevice->setPreemptionMode(PreemptionMode::ThreadGroup);
 
-    auto mockCsr = new MockCsrHw2<FamilyType>(*pDevice->executionEnvironment, pDevice->getRootDeviceIndex());
+    auto mockCsr = new MockCsrHw2<FamilyType>(*pDevice->executionEnvironment, pDevice->getRootDeviceIndex(), pDevice->getDeviceBitfield());
     pDevice->resetCommandStreamReceiver(mockCsr);
 
     MockKernelWithInternals mockKernel(*pClDevice);
     MultiDispatchInfo multiDispatch(mockKernel.mockKernel);
-    EXPECT_EQ(PreemptionMode::ThreadGroup, PreemptionHelper::taskPreemptionMode(*pDevice, multiDispatch));
+    EXPECT_EQ(PreemptionMode::ThreadGroup, ClPreemptionHelper::taskPreemptionMode(*pDevice, multiDispatch));
 
     size_t gws[3] = {1, 0, 0};
     pCmdQ->enqueueKernel(mockKernel.mockKernel, 1, nullptr, gws, nullptr, 0, nullptr, nullptr);
@@ -173,12 +174,12 @@ GEN9TEST_F(Gen9PreemptionEnqueueKernelTest, givenValidKernelForPreemptionWhenEnq
 GEN9TEST_F(Gen9PreemptionEnqueueKernelTest, givenValidKernelForPreemptionWhenEnqueueKernelCalledAndBlockedThenPassDevicePreemptionModeThreadGroup) {
     pDevice->setPreemptionMode(PreemptionMode::ThreadGroup);
 
-    auto mockCsr = new MockCsrHw2<FamilyType>(*pDevice->executionEnvironment, pDevice->getRootDeviceIndex());
+    auto mockCsr = new MockCsrHw2<FamilyType>(*pDevice->executionEnvironment, pDevice->getRootDeviceIndex(), pDevice->getDeviceBitfield());
     pDevice->resetCommandStreamReceiver(mockCsr);
 
     MockKernelWithInternals mockKernel(*pClDevice);
     MultiDispatchInfo multiDispatch(mockKernel.mockKernel);
-    EXPECT_EQ(PreemptionMode::ThreadGroup, PreemptionHelper::taskPreemptionMode(*pDevice, multiDispatch));
+    EXPECT_EQ(PreemptionMode::ThreadGroup, ClPreemptionHelper::taskPreemptionMode(*pDevice, multiDispatch));
 
     UserEvent userEventObj;
     cl_event userEvent = &userEventObj;
@@ -197,7 +198,7 @@ GEN9TEST_F(Gen9MidThreadPreemptionEnqueueKernelTest, givenSecondEnqueueWithTheSa
     typedef typename FamilyType::MI_LOAD_REGISTER_IMM MI_LOAD_REGISTER_IMM;
     typedef typename FamilyType::GPGPU_CSR_BASE_ADDRESS GPGPU_CSR_BASE_ADDRESS;
 
-    pDevice->getRootDeviceEnvironment().getMutableHardwareInfo()->workaroundTable.waModifyVFEStateAfterGPGPUPreemption = false;
+    pDevice->getRootDeviceEnvironment().getMutableHardwareInfo()->workaroundTable.flags.waModifyVFEStateAfterGPGPUPreemption = false;
 
     auto &csr = pDevice->getUltCommandStreamReceiver<FamilyType>();
     csr.getMemoryManager()->setForce32BitAllocations(false);
@@ -274,7 +275,7 @@ GEN9TEST_F(Gen9MidThreadPreemptionEnqueueKernelTest, givenSecondEnqueueWithTheSa
     typedef typename FamilyType::MI_LOAD_REGISTER_IMM MI_LOAD_REGISTER_IMM;
     typedef typename FamilyType::GPGPU_CSR_BASE_ADDRESS GPGPU_CSR_BASE_ADDRESS;
 
-    pDevice->getRootDeviceEnvironment().getMutableHardwareInfo()->workaroundTable.waModifyVFEStateAfterGPGPUPreemption = true;
+    pDevice->getRootDeviceEnvironment().getMutableHardwareInfo()->workaroundTable.flags.waModifyVFEStateAfterGPGPUPreemption = true;
 
     auto &csr = pDevice->getUltCommandStreamReceiver<FamilyType>();
     csr.getMemoryManager()->setForce32BitAllocations(false);
@@ -374,12 +375,12 @@ GEN9TEST_F(Gen9MidThreadPreemptionEnqueueKernelTest, givenSecondEnqueueWithTheSa
 GEN9TEST_F(Gen9PreemptionEnqueueKernelTest, givenDisabledPreemptionWhenEnqueueKernelCalledThenPassDisabledPreemptionMode) {
     pDevice->setPreemptionMode(PreemptionMode::Disabled);
 
-    auto mockCsr = new MockCsrHw2<FamilyType>(*pDevice->executionEnvironment, pDevice->getRootDeviceIndex());
+    auto mockCsr = new MockCsrHw2<FamilyType>(*pDevice->executionEnvironment, pDevice->getRootDeviceIndex(), pDevice->getDeviceBitfield());
     pDevice->resetCommandStreamReceiver(mockCsr);
 
     MockKernelWithInternals mockKernel(*pClDevice);
     MultiDispatchInfo multiDispatch(mockKernel.mockKernel);
-    EXPECT_EQ(PreemptionMode::Disabled, PreemptionHelper::taskPreemptionMode(*pDevice, multiDispatch));
+    EXPECT_EQ(PreemptionMode::Disabled, ClPreemptionHelper::taskPreemptionMode(*pDevice, multiDispatch));
 
     size_t gws[3] = {1, 0, 0};
     pCmdQ->enqueueKernel(mockKernel.mockKernel, 1, nullptr, gws, nullptr, 0, nullptr, nullptr);

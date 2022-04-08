@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -32,7 +32,7 @@ void *CommandQueue::cpuDataTransferHandler(TransferProperties &transferPropertie
                               transferProperties.memObj->calculateOffsetForMapping(transferProperties.offset) + transferProperties.mipPtrOffset);
 
         if (!transferProperties.memObj->addMappedPtr(returnPtr, transferProperties.memObj->calculateMappedPtrLength(transferProperties.size),
-                                                     transferProperties.mapFlags, transferProperties.size, transferProperties.offset, transferProperties.mipLevel)) {
+                                                     transferProperties.mapFlags, transferProperties.size, transferProperties.offset, transferProperties.mipLevel, nullptr)) {
             err.set(CL_INVALID_OPERATION);
             return nullptr;
         }
@@ -107,13 +107,17 @@ void *CommandQueue::cpuDataTransferHandler(TransferProperties &transferPropertie
         switch (transferProperties.cmdType) {
         case CL_COMMAND_MAP_BUFFER:
             if (!transferProperties.memObj->isMemObjZeroCopy()) {
-                transferProperties.memObj->transferDataToHostPtr(transferProperties.size, transferProperties.offset);
+                if (transferProperties.mapFlags != CL_MAP_WRITE_INVALIDATE_REGION) {
+                    transferProperties.memObj->transferDataToHostPtr(transferProperties.size, transferProperties.offset);
+                }
                 eventCompleted = true;
             }
             break;
         case CL_COMMAND_MAP_IMAGE:
             if (!transferProperties.memObj->isMemObjZeroCopy()) {
-                transferProperties.memObj->transferDataToHostPtr(transferProperties.size, transferProperties.offset);
+                if (transferProperties.mapFlags != CL_MAP_WRITE_INVALIDATE_REGION) {
+                    transferProperties.memObj->transferDataToHostPtr(transferProperties.size, transferProperties.offset);
+                }
                 eventCompleted = true;
             }
             break;
@@ -145,7 +149,7 @@ void *CommandQueue::cpuDataTransferHandler(TransferProperties &transferPropertie
 
         if (outEventObj) {
             outEventObj->setEndTimeStamp();
-            outEventObj->updateTaskCount(this->taskCount, this->bcsTaskCount);
+            outEventObj->updateTaskCount(this->taskCount, outEventObj->peekBcsTaskCountFromCommandQueue());
             outEventObj->flushStamp->replaceStampObject(this->flushStamp->getStampReference());
             if (eventCompleted) {
                 outEventObj->setStatus(CL_COMPLETE);

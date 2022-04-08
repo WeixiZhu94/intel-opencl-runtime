@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -7,7 +7,9 @@
 
 #include "shared/source/command_stream/command_stream_receiver.h"
 #include "shared/source/helpers/aligned_memory.h"
-#include "shared/test/unit_test/helpers/debug_manager_state_restore.h"
+#include "shared/test/common/helpers/debug_manager_state_restore.h"
+#include "shared/test/common/mocks/mock_gmm.h"
+#include "shared/test/common/test_macros/test.h"
 
 #include "opencl/test/unit_test/command_queue/command_queue_fixture.h"
 #include "opencl/test/unit_test/command_queue/enqueue_map_buffer_fixture.h"
@@ -17,7 +19,6 @@
 #include "opencl/test/unit_test/mocks/mock_command_queue.h"
 #include "opencl/test/unit_test/mocks/mock_context.h"
 #include "opencl/test/unit_test/mocks/mock_kernel.h"
-#include "test.h"
 
 #include "gtest/gtest.h"
 
@@ -294,7 +295,7 @@ HWTEST_F(EnqueueMapBufferTest, givenNonBlockingReadOnlyMapBufferOnZeroCopyBuffer
     EXPECT_EQ(0u, taskCount);
 
     // enqueue something that can be finished...
-    retVal = clEnqueueNDRangeKernel(&mockCmdQueue, kernel, 1, 0, &GWS, nullptr, 0, nullptr, nullptr);
+    retVal = clEnqueueNDRangeKernel(&mockCmdQueue, kernel.mockMultiDeviceKernel, 1, 0, &GWS, nullptr, 0, nullptr, nullptr);
     EXPECT_EQ(retVal, CL_SUCCESS);
 
     EXPECT_EQ(1u, commandStreamReceiver.peekTaskCount());
@@ -375,7 +376,12 @@ TEST_F(EnqueueMapBufferTest, givenNonReadOnlyBufferWhenMappedOnGpuThenSetValidEv
 
     std::unique_ptr<Buffer> buffer(Buffer::create(BufferDefaults::context, CL_MEM_READ_WRITE, 20, nullptr, retVal));
     buffer->setSharingHandler(new SharingHandler());
+    auto gfxAllocation = buffer->getGraphicsAllocation(pDevice->getRootDeviceIndex());
+    for (auto handleId = 0u; handleId < gfxAllocation->getNumGmms(); handleId++) {
+        gfxAllocation->setGmm(new MockGmm(pDevice->getGmmClientContext()), handleId);
+    }
     buffer->forceDisallowCPUCopy = true;
+
     EXPECT_EQ(CL_SUCCESS, retVal);
     EXPECT_NE(nullptr, buffer.get());
 
@@ -418,6 +424,10 @@ TEST_F(EnqueueMapBufferTest, givenReadOnlyBufferWhenMappedOnGpuThenSetValidEvent
 
     std::unique_ptr<Buffer> buffer(Buffer::create(BufferDefaults::context, CL_MEM_READ_WRITE, 20, nullptr, retVal));
     buffer->setSharingHandler(new SharingHandler());
+    auto gfxAllocation = buffer->getGraphicsAllocation(pDevice->getRootDeviceIndex());
+    for (auto handleId = 0u; handleId < gfxAllocation->getNumGmms(); handleId++) {
+        gfxAllocation->setGmm(new MockGmm(pDevice->getGmmClientContext()), handleId);
+    }
     EXPECT_EQ(CL_SUCCESS, retVal);
     EXPECT_NE(nullptr, buffer.get());
 
@@ -472,7 +482,7 @@ TEST_F(EnqueueMapBufferTest, givenNonBlockingMapBufferAfterL3IsAlreadyFlushedThe
     EXPECT_EQ(0u, taskCount);
 
     // enqueue something that map buffer needs to wait for
-    retVal = clEnqueueNDRangeKernel(pCmdQ, kernel, 1, 0, &GWS, nullptr, 0, nullptr, nullptr);
+    retVal = clEnqueueNDRangeKernel(pCmdQ, kernel.mockMultiDeviceKernel, 1, 0, &GWS, nullptr, 0, nullptr, nullptr);
     EXPECT_EQ(retVal, CL_SUCCESS);
 
     auto NDRcompletionStamp = commandStreamReceiver.peekTaskCount();
@@ -547,7 +557,7 @@ HWTEST_F(EnqueueMapBufferTest, GivenBufferThatIsNotZeroCopyWhenNonBlockingMapIsC
     MockCommandQueueHw<FamilyType> mockCmdQueue(context, pClDevice, nullptr);
 
     // enqueue something that can be finished
-    retVal = clEnqueueNDRangeKernel(&mockCmdQueue, kernel, 1, 0, &GWS, nullptr, 0, nullptr, nullptr);
+    retVal = clEnqueueNDRangeKernel(&mockCmdQueue, kernel.mockMultiDeviceKernel, 1, 0, &GWS, nullptr, 0, nullptr, nullptr);
     EXPECT_EQ(retVal, CL_SUCCESS);
 
     auto &commandStreamReceiver = mockCmdQueue.getGpgpuCommandStreamReceiver();
@@ -736,4 +746,28 @@ TEST_F(EnqueueMapBufferTest, givenBufferWithUseHostPtrFlagWhenMappedOnCpuThenSet
     auto expectedPtr = ptrOffset(buffer->getCpuAddressForMapping(), mapOffset);
 
     EXPECT_EQ(mappedPtr, expectedPtr);
+}
+
+HWTEST_F(EnqueueMapBufferTest, givenMapBufferOnGpuWhenMappingBufferThenStoreGraphicsAllocationInMapInfo) {
+    uint8_t hostPtr[10] = {};
+    std::unique_ptr<Buffer> bufferForCpuMap(Buffer::create(context, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR, 10, hostPtr, retVal));
+    ASSERT_NE(nullptr, bufferForCpuMap);
+    ASSERT_TRUE(bufferForCpuMap->mappingOnCpuAllowed());
+
+    std::unique_ptr<Buffer> bufferForGpuMap(Buffer::create(context, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR, 10, hostPtr, retVal));
+    ASSERT_NE(nullptr, bufferForGpuMap);
+    forceMapBufferOnGpu(*bufferForGpuMap);
+    ASSERT_FALSE(bufferForGpuMap->mappingOnCpuAllowed());
+
+    cl_int retVal{};
+    void *pointerMappedOnCpu = clEnqueueMapBuffer(pCmdQ, bufferForCpuMap.get(), CL_FALSE, CL_MAP_READ, 0, 10, 0, nullptr, nullptr, &retVal);
+    EXPECT_EQ(CL_SUCCESS, retVal);
+    void *pointerMappedOnGpu = clEnqueueMapBuffer(pCmdQ, bufferForGpuMap.get(), CL_FALSE, CL_MAP_READ, 0, 10, 0, nullptr, nullptr, &retVal);
+    EXPECT_EQ(CL_SUCCESS, retVal);
+
+    MapInfo mapInfo{};
+    EXPECT_TRUE(bufferForCpuMap->findMappedPtr(pointerMappedOnCpu, mapInfo));
+    EXPECT_EQ(nullptr, mapInfo.graphicsAllocation);
+    EXPECT_TRUE(bufferForGpuMap->findMappedPtr(pointerMappedOnGpu, mapInfo));
+    EXPECT_NE(nullptr, mapInfo.graphicsAllocation);
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2022 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -7,16 +7,16 @@
 
 #pragma once
 
+#include "shared/source/gmm_helper/gmm_helper.h"
 #include "shared/source/helpers/constants.h"
 #include "shared/source/helpers/debug_helpers.h"
 #include "shared/source/helpers/ptr_math.h"
+#include "shared/source/memory_manager/definitions/engine_limits.h"
+#include "shared/source/memory_manager/definitions/storage_info.h"
 #include "shared/source/memory_manager/host_ptr_defines.h"
 #include "shared/source/memory_manager/memory_pool.h"
 #include "shared/source/utilities/idlist.h"
 #include "shared/source/utilities/stackvec.h"
-
-#include "engine_limits.h"
-#include "storage_info.h"
 
 #include <array>
 #include <atomic>
@@ -30,6 +30,7 @@ namespace NEO {
 
 using osHandle = unsigned int;
 inline osHandle toOsHandle(const void *handle) {
+
     return static_cast<osHandle>(castToUint64(handle));
 }
 
@@ -55,11 +56,9 @@ class GraphicsAllocation : public IDNode<GraphicsAllocation> {
     enum class AllocationType {
         UNKNOWN = 0,
         BUFFER,
-        BUFFER_COMPRESSED,
         BUFFER_HOST_MEMORY,
         COMMAND_BUFFER,
         CONSTANT_SURFACE,
-        DEVICE_QUEUE_BUFFER,
         EXTERNAL_HOST_PTR,
         FILL_PATTERN,
         GLOBAL_SURFACE,
@@ -69,6 +68,7 @@ class GraphicsAllocation : public IDNode<GraphicsAllocation> {
         INTERNAL_HEAP,
         INTERNAL_HOST_MEMORY,
         KERNEL_ISA,
+        KERNEL_ISA_INTERNAL,
         LINEAR_STREAM,
         MAP_ALLOCATION,
         MCS,
@@ -93,7 +93,19 @@ class GraphicsAllocation : public IDNode<GraphicsAllocation> {
         RING_BUFFER,
         SEMAPHORE_BUFFER,
         DEBUG_CONTEXT_SAVE_AREA,
-        DEBUG_SBA_TRACKING_BUFFER
+        DEBUG_SBA_TRACKING_BUFFER,
+        DEBUG_MODULE_AREA,
+        UNIFIED_SHARED_MEMORY,
+        WORK_PARTITION_SURFACE,
+        GPU_TIMESTAMP_DEVICE_BUFFER,
+        SW_TAG_BUFFER,
+        COUNT
+    };
+
+    enum UsmInitialPlacement {
+        DEFAULT,
+        CPU,
+        GPU
     };
 
     ~GraphicsAllocation() override;
@@ -101,18 +113,18 @@ class GraphicsAllocation : public IDNode<GraphicsAllocation> {
     GraphicsAllocation(const GraphicsAllocation &) = delete;
 
     GraphicsAllocation(uint32_t rootDeviceIndex, AllocationType allocationType, void *cpuPtrIn,
-                       uint64_t gpuAddress, uint64_t baseAddress, size_t sizeIn, MemoryPool::Type pool)
-        : GraphicsAllocation(rootDeviceIndex, 1, allocationType, cpuPtrIn, gpuAddress, baseAddress, sizeIn, pool) {}
+                       uint64_t gpuAddress, uint64_t baseAddress, size_t sizeIn, MemoryPool::Type pool, size_t maxOsContextCount)
+        : GraphicsAllocation(rootDeviceIndex, 1, allocationType, cpuPtrIn, gpuAddress, baseAddress, sizeIn, pool, maxOsContextCount) {}
 
     GraphicsAllocation(uint32_t rootDeviceIndex, AllocationType allocationType, void *cpuPtrIn,
-                       size_t sizeIn, osHandle sharedHandleIn, MemoryPool::Type pool)
-        : GraphicsAllocation(rootDeviceIndex, 1, allocationType, cpuPtrIn, sizeIn, sharedHandleIn, pool) {}
+                       size_t sizeIn, osHandle sharedHandleIn, MemoryPool::Type pool, size_t maxOsContextCount)
+        : GraphicsAllocation(rootDeviceIndex, 1, allocationType, cpuPtrIn, sizeIn, sharedHandleIn, pool, maxOsContextCount) {}
 
     GraphicsAllocation(uint32_t rootDeviceIndex, size_t numGmms, AllocationType allocationType, void *cpuPtrIn,
-                       uint64_t gpuAddress, uint64_t baseAddress, size_t sizeIn, MemoryPool::Type pool);
+                       uint64_t gpuAddress, uint64_t baseAddress, size_t sizeIn, MemoryPool::Type pool, size_t maxOsContextCount);
 
     GraphicsAllocation(uint32_t rootDeviceIndex, size_t numGmms, AllocationType allocationType, void *cpuPtrIn,
-                       size_t sizeIn, osHandle sharedHandleIn, MemoryPool::Type pool);
+                       size_t sizeIn, osHandle sharedHandleIn, MemoryPool::Type pool, size_t maxOsContextCount);
 
     uint32_t getRootDeviceIndex() const { return rootDeviceIndex; }
     void *getUnderlyingBuffer() const { return cpuPtr; }
@@ -121,7 +133,7 @@ class GraphicsAllocation : public IDNode<GraphicsAllocation> {
 
     void setCpuPtrAndGpuAddress(void *cpuPtr, uint64_t gpuAddress) {
         this->cpuPtr = cpuPtr;
-        this->gpuAddress = gpuAddress;
+        this->gpuAddress = GmmHelper::canonize(gpuAddress);
     }
     size_t getUnderlyingBufferSize() const { return size; }
     void setSize(size_t size) { this->size = size; }
@@ -159,6 +171,9 @@ class GraphicsAllocation : public IDNode<GraphicsAllocation> {
     bool peekEvictable() const { return allocationInfo.flags.evictable; }
     bool isFlushL3Required() const { return allocationInfo.flags.flushL3Required; }
     void setFlushL3Required(bool flushL3Required) { allocationInfo.flags.flushL3Required = flushL3Required; }
+
+    bool isUncacheable() const { return allocationInfo.flags.uncacheable; }
+    void setUncacheable(bool uncacheable) { allocationInfo.flags.uncacheable = uncacheable; }
     bool is32BitAllocation() const { return allocationInfo.flags.is32BitAllocation; }
     void set32BitAllocation(bool is32BitAllocation) { allocationInfo.flags.is32BitAllocation = is32BitAllocation; }
 
@@ -178,6 +193,7 @@ class GraphicsAllocation : public IDNode<GraphicsAllocation> {
     void decReuseCount() { sharingInfo.reuseCount--; }
     uint32_t peekReuseCount() const { return sharingInfo.reuseCount; }
     osHandle peekSharedHandle() const { return sharingInfo.sharedHandle; }
+    void setSharedHandle(osHandle handle) { sharingInfo.sharedHandle = handle; }
 
     void setAllocationType(AllocationType allocationType);
     AllocationType getAllocationType() const { return allocationType; }
@@ -217,8 +233,24 @@ class GraphicsAllocation : public IDNode<GraphicsAllocation> {
                allocationType == AllocationType::PRINTF_SURFACE ||
                allocationType == AllocationType::TIMESTAMP_PACKET_TAG_BUFFER ||
                allocationType == AllocationType::RING_BUFFER ||
-               allocationType == AllocationType::SEMAPHORE_BUFFER;
+               allocationType == AllocationType::SEMAPHORE_BUFFER ||
+               allocationType == AllocationType::DEBUG_CONTEXT_SAVE_AREA ||
+               allocationType == AllocationType::GPU_TIMESTAMP_DEVICE_BUFFER ||
+               allocationType == AllocationType::DEBUG_MODULE_AREA;
     }
+    static bool isLockable(AllocationType allocationType) {
+        return isCpuAccessRequired(allocationType) ||
+               isIsaAllocationType(allocationType) ||
+               allocationType == AllocationType::BUFFER_HOST_MEMORY ||
+               allocationType == AllocationType::SHARED_RESOURCE_COPY;
+    }
+
+    static bool isIsaAllocationType(GraphicsAllocation::AllocationType type) {
+        return type == GraphicsAllocation::AllocationType::KERNEL_ISA ||
+               type == GraphicsAllocation::AllocationType::KERNEL_ISA_INTERNAL ||
+               type == AllocationType::DEBUG_MODULE_AREA;
+    }
+
     void *getReservedAddressPtr() const {
         return this->reservedAddressRangeInfo.addressPtr;
     }
@@ -242,6 +274,9 @@ class GraphicsAllocation : public IDNode<GraphicsAllocation> {
     void setGmm(Gmm *gmm, uint32_t handleId) {
         gmms[handleId] = gmm;
     }
+    void resizeGmms(uint32_t size) {
+        gmms.resize(size);
+    }
 
     uint32_t getNumGmms() const {
         return static_cast<uint32_t>(gmms.size());
@@ -250,8 +285,11 @@ class GraphicsAllocation : public IDNode<GraphicsAllocation> {
     uint32_t getUsedPageSize() const;
 
     bool isAllocatedInLocalMemoryPool() const { return (this->memoryPool == MemoryPool::LocalMemory); }
+    bool isAllocationLockable() const;
 
     const AubInfo &getAubInfo() const { return aubInfo; }
+
+    bool isCompressionEnabled() const;
 
     OsHandleStorage fragmentsStorage;
     StorageInfo storageInfo = {};
@@ -279,8 +317,9 @@ class GraphicsAllocation : public IDNode<GraphicsAllocation> {
                 uint32_t coherent : 1;
                 uint32_t evictable : 1;
                 uint32_t flushL3Required : 1;
+                uint32_t uncacheable : 1;
                 uint32_t is32BitAllocation : 1;
-                uint32_t reserved : 28;
+                uint32_t reserved : 27;
             } flags;
             uint32_t allFlags = 0u;
         };

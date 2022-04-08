@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -11,17 +11,14 @@
 #include "shared/source/os_interface/linux/os_library_linux.h"
 #endif
 #include "shared/source/os_interface/os_library.h"
-
-#include "opencl/test/unit_test/fixtures/memory_management_fixture.h"
-#include "test.h"
+#include "shared/test/common/fixtures/memory_management_fixture.h"
+#include "shared/test/common/test_macros/test.h"
 
 #include "gtest/gtest.h"
 
 #include <memory>
 
 namespace Os {
-extern const char *frontEndDllName;
-extern const char *igcDllName;
 extern const char *testDllName;
 } // namespace Os
 const std::string fakeLibName = "_fake_library_name_";
@@ -41,8 +38,22 @@ TEST(OSLibraryTest, GivenFakeLibNameWhenLoadingLibraryThenNullIsReturned) {
     EXPECT_EQ(nullptr, library);
 }
 
+TEST(OSLibraryTest, GivenFakeLibNameWhenLoadingLibraryThenNullIsReturnedAndErrorString) {
+    std::string errorValue;
+    OsLibrary *library = OsLibrary::load(fakeLibName, &errorValue);
+    EXPECT_FALSE(errorValue.empty());
+    EXPECT_EQ(nullptr, library);
+}
+
 TEST(OSLibraryTest, GivenValidLibNameWhenLoadingLibraryThenLibraryIsLoaded) {
     std::unique_ptr<OsLibrary> library(OsLibrary::load(Os::testDllName));
+    EXPECT_NE(nullptr, library);
+}
+
+TEST(OSLibraryTest, GivenValidLibNameWhenLoadingLibraryThenLibraryIsLoadedWithNoErrorString) {
+    std::string errorValue;
+    std::unique_ptr<OsLibrary> library(OsLibrary::load(Os::testDllName, &errorValue));
+    EXPECT_TRUE(errorValue.empty());
     EXPECT_NE(nullptr, library);
 }
 

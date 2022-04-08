@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 Intel Corporation
+ * Copyright (C) 2020-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -8,11 +8,18 @@
 #pragma once
 #include "shared/source/memory_manager/graphics_allocation.h"
 
+#include <functional>
+
 namespace NEO {
+
+class MigrationSyncData;
 
 class MultiGraphicsAllocation {
   public:
     MultiGraphicsAllocation(uint32_t maxRootDeviceIndex);
+    MultiGraphicsAllocation(const MultiGraphicsAllocation &multiGraphicsAllocation);
+    MultiGraphicsAllocation(MultiGraphicsAllocation &&);
+    ~MultiGraphicsAllocation();
 
     GraphicsAllocation *getDefaultGraphicsAllocation() const;
 
@@ -26,10 +33,18 @@ class MultiGraphicsAllocation {
 
     bool isCoherent() const;
 
-    std::vector<GraphicsAllocation *> const &getGraphicsAllocations() const;
+    StackVec<GraphicsAllocation *, 1> const &getGraphicsAllocations() const;
+
+    bool requiresMigrations() const;
+    MigrationSyncData *getMigrationSyncData() const { return migrationSyncData; }
+    void setMultiStorage(bool value);
+
+    static std::function<MigrationSyncData *(size_t size)> createMigrationSyncDataFunc;
 
   protected:
-    std::vector<GraphicsAllocation *> graphicsAllocations;
+    bool isMultiStorage = false;
+    MigrationSyncData *migrationSyncData = nullptr;
+    StackVec<GraphicsAllocation *, 1> graphicsAllocations;
 };
 
 } // namespace NEO

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 Intel Corporation
+ * Copyright (C) 2020-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -7,12 +7,11 @@
 
 #include "shared/source/compiler_interface/linker.h"
 #include "shared/source/device_binary_format/patchtokens_decoder.h"
+#include "shared/source/program/kernel_info.h"
 #include "shared/source/program/program_info.h"
 #include "shared/source/program/program_info_from_patchtokens.h"
 #include "shared/test/unit_test/compiler_interface/linker_mock.h"
 #include "shared/test/unit_test/device_binary_format/patchtokens_tests.h"
-
-#include "opencl/source/program/kernel_info.h"
 
 #include "RelocationInfo.h"
 #include "gmock/gmock.h"
@@ -73,9 +72,10 @@ TEST(PopulateProgramInfoFromPatchtokensTests, WhenProgramRequiresGlobalConstants
     ASSERT_EQ(1U, programInfo.linkerInput->getDataRelocations().size());
     auto relocation = programInfo.linkerInput->getDataRelocations()[0];
     EXPECT_EQ(programFromTokens.programScopeTokens.constantPointer[0]->ConstantPointerOffset, relocation.offset);
-    EXPECT_TRUE(relocation.symbolName.empty());
     EXPECT_EQ(NEO::SegmentType::GlobalConstants, relocation.relocationSegment);
-    EXPECT_EQ(NEO::SegmentType::GlobalConstants, relocation.symbolSegment);
+    auto symbol = programInfo.linkerInput->getSymbols().find(relocation.symbolName);
+    EXPECT_TRUE(symbol != programInfo.linkerInput->getSymbols().end());
+    EXPECT_EQ(NEO::SegmentType::GlobalConstants, symbol->second.segment);
     EXPECT_EQ(NEO::LinkerInput::RelocationInfo::Type::Address, relocation.type);
 }
 
@@ -88,9 +88,10 @@ TEST(PopulateProgramInfoFromPatchtokensTests, WhenProgramRequiresGlobalVariables
     ASSERT_EQ(1U, programInfo.linkerInput->getDataRelocations().size());
     auto relocation = programInfo.linkerInput->getDataRelocations()[0];
     EXPECT_EQ(NEO::readMisalignedUint64(&programFromTokens.programScopeTokens.globalPointer[0]->GlobalPointerOffset), relocation.offset);
-    EXPECT_TRUE(relocation.symbolName.empty());
     EXPECT_EQ(NEO::SegmentType::GlobalVariables, relocation.relocationSegment);
-    EXPECT_EQ(NEO::SegmentType::GlobalVariables, relocation.symbolSegment);
+    auto symbol = programInfo.linkerInput->getSymbols().find(relocation.symbolName);
+    EXPECT_TRUE(symbol != programInfo.linkerInput->getSymbols().end());
+    EXPECT_EQ(NEO::SegmentType::GlobalVariables, symbol->second.segment);
     EXPECT_EQ(NEO::LinkerInput::RelocationInfo::Type::Address, relocation.type);
 }
 
@@ -118,16 +119,19 @@ TEST(PopulateProgramInfoFromPatchtokensTests, WhenProgramRequiresMixedGlobalVarA
 
     ASSERT_NE(nullptr, relocationGlobalConst);
     EXPECT_EQ(NEO::readMisalignedUint64(&programFromTokens.programScopeTokens.constantPointer[0]->ConstantPointerOffset), relocationGlobalConst->offset);
-    EXPECT_TRUE(relocationGlobalConst->symbolName.empty());
+    EXPECT_FALSE(relocationGlobalConst->symbolName.empty());
     EXPECT_EQ(NEO::SegmentType::GlobalConstants, relocationGlobalConst->relocationSegment);
-    EXPECT_EQ(NEO::SegmentType::GlobalVariables, relocationGlobalConst->symbolSegment);
-    EXPECT_EQ(NEO::LinkerInput::RelocationInfo::Type::Address, relocationGlobalConst->type);
+    auto symbol1 = programInfo.linkerInput->getSymbols().find(relocationGlobalConst->symbolName);
+    EXPECT_TRUE(symbol1 != programInfo.linkerInput->getSymbols().end());
+    EXPECT_EQ(NEO::SegmentType::GlobalVariables, symbol1->second.segment);
 
     ASSERT_NE(nullptr, relocationGlobalVar);
     EXPECT_EQ(NEO::readMisalignedUint64(&programFromTokens.programScopeTokens.globalPointer[0]->GlobalPointerOffset), relocationGlobalVar->offset);
-    EXPECT_TRUE(relocationGlobalVar->symbolName.empty());
+    EXPECT_FALSE(relocationGlobalVar->symbolName.empty());
     EXPECT_EQ(NEO::SegmentType::GlobalVariables, relocationGlobalVar->relocationSegment);
-    EXPECT_EQ(NEO::SegmentType::GlobalConstants, relocationGlobalVar->symbolSegment);
+    auto symbol2 = programInfo.linkerInput->getSymbols().find(relocationGlobalVar->symbolName);
+    EXPECT_TRUE(symbol2 != programInfo.linkerInput->getSymbols().end());
+    EXPECT_EQ(NEO::SegmentType::GlobalConstants, symbol2->second.segment);
     EXPECT_EQ(NEO::LinkerInput::RelocationInfo::Type::Address, relocationGlobalVar->type);
 }
 
@@ -189,9 +193,9 @@ TEST(PopulateProgramInfoFromPatchtokensTests, GivenProgramWithKernelsThenKernelI
     NEO::ProgramInfo programInfo = {};
     NEO::populateProgramInfo(programInfo, programFromTokens);
     ASSERT_EQ(3U, programInfo.kernelInfos.size());
-    EXPECT_EQ(programFromTokens.header->GPUPointerSizeInBytes, programInfo.kernelInfos[0]->gpuPointerSize);
-    EXPECT_EQ(programFromTokens.header->GPUPointerSizeInBytes, programInfo.kernelInfos[1]->gpuPointerSize);
-    EXPECT_EQ(programFromTokens.header->GPUPointerSizeInBytes, programInfo.kernelInfos[2]->gpuPointerSize);
+    EXPECT_EQ(programFromTokens.header->GPUPointerSizeInBytes, programInfo.kernelInfos[0]->kernelDescriptor.kernelAttributes.gpuPointerSize);
+    EXPECT_EQ(programFromTokens.header->GPUPointerSizeInBytes, programInfo.kernelInfos[1]->kernelDescriptor.kernelAttributes.gpuPointerSize);
+    EXPECT_EQ(programFromTokens.header->GPUPointerSizeInBytes, programInfo.kernelInfos[2]->kernelDescriptor.kernelAttributes.gpuPointerSize);
 }
 
 TEST(PopulateProgramInfoFromPatchtokensTests, GivenProgramWithKernelsWhenKernelHasSymbolTableThenLinkerIsUpdatedWithAdditionalSymbolInfo) {

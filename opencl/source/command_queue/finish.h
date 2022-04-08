@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -19,15 +19,8 @@ cl_int CommandQueueHw<GfxFamily>::finish() {
         return CL_OUT_OF_RESOURCES;
     }
 
-    //as long as queue is blocked we need to stall.
-    while (isQueueBlocked())
-        ;
-
-    auto taskCountToWaitFor = this->taskCount;
-    auto flushStampToWaitFor = this->flushStamp->peekStamp();
-
-    // Stall until HW reaches CQ taskCount
-    waitUntilComplete(taskCountToWaitFor, this->bcsTaskCount, flushStampToWaitFor, false);
+    // Stall until HW reaches taskCount on all its engines
+    waitForAllEngines(true, nullptr);
 
     return CL_SUCCESS;
 }

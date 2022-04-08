@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019-2020 Intel Corporation
+ * Copyright (C) 2020-2022 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -7,19 +7,28 @@
 
 #include "level_zero/core/source/cmdlist/cmdlist.h"
 
+#include "shared/source/command_stream/command_stream_receiver.h"
 #include "shared/source/command_stream/preemption.h"
 #include "shared/source/device/device_info.h"
+#include "shared/source/memory_manager/graphics_allocation.h"
+#include "shared/source/memory_manager/internal_allocation_storage.h"
 #include "shared/source/memory_manager/memory_manager.h"
 
+#include "level_zero/core/source/device/device_imp.h"
+
 namespace L0 {
+
 CommandList::~CommandList() {
     if (cmdQImmediate) {
         cmdQImmediate->destroy();
     }
     removeDeallocationContainerData();
-    removeHostPtrAllocations();
+    if (this->cmdListType == CommandListType::TYPE_REGULAR || !this->isFlushTaskSubmissionEnabled) {
+        removeHostPtrAllocations();
+    }
     printfFunctionContainer.clear();
 }
+
 void CommandList::storePrintfFunction(Kernel *kernel) {
     auto it = std::find(this->printfFunctionContainer.begin(), this->printfFunctionContainer.end(),
                         kernel);
@@ -51,17 +60,29 @@ NEO::GraphicsAllocation *CommandList::getAllocationFromHostPtrMap(const void *bu
             return allocation->second;
         }
     }
+    if (this->cmdListType == CommandListType::TYPE_IMMEDIATE && this->isFlushTaskSubmissionEnabled) {
+        auto allocation = this->csr->getInternalAllocationStorage()->obtainTemporaryAllocationWithPtr(bufferSize, buffer, NEO::GraphicsAllocation::AllocationType::EXTERNAL_HOST_PTR);
+        if (allocation != nullptr) {
+            auto alloc = allocation.get();
+            this->csr->getInternalAllocationStorage()->storeAllocation(std::move(allocation), NEO::AllocationUsage::TEMPORARY_ALLOCATION);
+            return alloc;
+        }
+    }
     return nullptr;
 }
 
-NEO::GraphicsAllocation *CommandList::getHostPtrAlloc(const void *buffer, uint64_t bufferSize, size_t *offset) {
+NEO::GraphicsAllocation *CommandList::getHostPtrAlloc(const void *buffer, uint64_t bufferSize, bool hostCopyAllowed) {
     NEO::GraphicsAllocation *alloc = getAllocationFromHostPtrMap(buffer, bufferSize);
     if (alloc) {
-        *offset += ptrDiff(buffer, alloc->getUnderlyingBuffer());
         return alloc;
     }
-    alloc = device->allocateMemoryFromHostPtr(buffer, bufferSize);
-    hostPtrMap.insert(std::make_pair(buffer, alloc));
+    alloc = device->allocateMemoryFromHostPtr(buffer, bufferSize, hostCopyAllowed);
+    UNRECOVERABLE_IF(alloc == nullptr);
+    if (this->cmdListType == CommandListType::TYPE_IMMEDIATE && this->isFlushTaskSubmissionEnabled) {
+        this->csr->getInternalAllocationStorage()->storeAllocation(std::unique_ptr<NEO::GraphicsAllocation>(alloc), NEO::AllocationUsage::TEMPORARY_ALLOCATION);
+    } else {
+        hostPtrMap.insert(std::make_pair(buffer, alloc));
+    }
     return alloc;
 }
 
@@ -105,19 +126,63 @@ void CommandList::eraseResidencyContainerEntry(NEO::GraphicsAllocation *allocati
 }
 
 bool CommandList::isCopyOnly() const {
-    return isCopyOnlyCmdList;
+    const auto &hardwareInfo = device->getNEODevice()->getHardwareInfo();
+    auto &hwHelper = NEO::HwHelper::get(hardwareInfo.platform.eRenderCoreFamily);
+    return hwHelper.isCopyOnlyEngineType(engineGroupType);
 }
 
 NEO::PreemptionMode CommandList::obtainFunctionPreemptionMode(Kernel *kernel) {
-    auto functionAttributes = kernel->getImmutableData()->getDescriptor().kernelAttributes;
-    NEO::PreemptionFlags flags = {};
-    flags.flags.disabledMidThreadPreemptionKernel = functionAttributes.flags.requiresDisabledMidThreadPreemption;
-    flags.flags.usesFencesForReadWriteImages = functionAttributes.flags.usesFencesForReadWriteImages;
-    flags.flags.deviceSupportsVmePreemption = device->getDeviceInfo().vmeAvcSupportsPreemption;
-    flags.flags.disablePerCtxtPreemptionGranularityControl = device->getHwInfo().workaroundTable.waDisablePerCtxtPreemptionGranularityControl;
-    flags.flags.disableLSQCROPERFforOCL = device->getHwInfo().workaroundTable.waDisableLSQCROPERFforOCL;
-
+    NEO::PreemptionFlags flags = NEO::PreemptionHelper::createPreemptionLevelFlags(*device->getNEODevice(), &kernel->getImmutableData()->getDescriptor());
     return NEO::PreemptionHelper::taskPreemptionMode(device->getDevicePreemptionMode(), flags);
+}
+
+void CommandList::makeResidentAndMigrate(bool performMigration) {
+    for (auto alloc : commandContainer.getResidencyContainer()) {
+        csr->makeResident(*alloc);
+
+        if (performMigration &&
+            (alloc->getAllocationType() == NEO::GraphicsAllocation::AllocationType::SVM_GPU ||
+             alloc->getAllocationType() == NEO::GraphicsAllocation::AllocationType::SVM_CPU)) {
+            auto pageFaultManager = device->getDriverHandle()->getMemoryManager()->getPageFaultManager();
+            pageFaultManager->moveAllocationToGpuDomain(reinterpret_cast<void *>(alloc->getGpuAddress()));
+        }
+    }
+}
+
+void CommandList::migrateSharedAllocations() {
+    auto deviceImp = static_cast<DeviceImp *>(device);
+    DriverHandleImp *driverHandleImp = static_cast<DriverHandleImp *>(deviceImp->getDriverHandle());
+    std::lock_guard<std::mutex> lock(driverHandleImp->sharedMakeResidentAllocationsLock);
+    auto pageFaultManager = device->getDriverHandle()->getMemoryManager()->getPageFaultManager();
+    for (auto alloc : driverHandleImp->sharedMakeResidentAllocations) {
+        pageFaultManager->moveAllocationToGpuDomain(reinterpret_cast<void *>(alloc.second->getGpuAddress()));
+    }
+    if (this->unifiedMemoryControls.indirectSharedAllocationsAllowed) {
+        auto pageFaultManager = device->getDriverHandle()->getMemoryManager()->getPageFaultManager();
+        pageFaultManager->moveAllocationsWithinUMAllocsManagerToGpuDomain(this->device->getDriverHandle()->getSvmAllocsManager());
+    }
+}
+
+void CommandList::handleIndirectAllocationResidency() {
+    bool indirectAllocationsAllowed = this->hasIndirectAllocationsAllowed();
+    NEO::Device *neoDevice = this->device->getNEODevice();
+    if (indirectAllocationsAllowed) {
+        auto svmAllocsManager = this->device->getDriverHandle()->getSvmAllocsManager();
+        auto submitAsPack = this->device->getDriverHandle()->getMemoryManager()->allowIndirectAllocationsAsPack(neoDevice->getRootDeviceIndex());
+        if (NEO::DebugManager.flags.MakeIndirectAllocationsResidentAsPack.get() != -1) {
+            submitAsPack = !!NEO::DebugManager.flags.MakeIndirectAllocationsResidentAsPack.get();
+        }
+
+        if (submitAsPack) {
+            svmAllocsManager->makeIndirectAllocationsResident(*(this->csr), this->csr->peekTaskCount() + 1u);
+        } else {
+            UnifiedMemoryControls unifiedMemoryControls = this->getUnifiedMemoryControls();
+
+            svmAllocsManager->addInternalAllocationsToResidencyContainer(neoDevice->getRootDeviceIndex(),
+                                                                         this->commandContainer.getResidencyContainer(),
+                                                                         unifiedMemoryControls.generateMask());
+        }
+    }
 }
 
 } // namespace L0

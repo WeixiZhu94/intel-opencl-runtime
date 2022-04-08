@@ -1,10 +1,11 @@
 /*
- * Copyright (C) 2020 Intel Corporation
+ * Copyright (C) 2020-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
  */
 
+#include "shared/source/device/device.h"
 #include "shared/source/direct_submission/windows/wddm_direct_submission.h"
 #include "shared/source/execution_environment/root_device_environment.h"
 #include "shared/source/gmm_helper/gmm_helper.h"
@@ -40,27 +41,21 @@ WddmDirectSubmission<GfxFamily, Dispatcher>::WddmDirectSubmission(Device &device
 template <typename GfxFamily, typename Dispatcher>
 WddmDirectSubmission<GfxFamily, Dispatcher>::~WddmDirectSubmission() {
     perfLogResidencyVariadicLog(wddm->getResidencyLogger(), "Stopping Wddm ULLS\n");
-    if (ringStart) {
-        stopRingBuffer();
+    if (this->ringStart) {
+        this->stopRingBuffer();
         WddmDirectSubmission<GfxFamily, Dispatcher>::handleCompletionRingBuffer(ringFence.lastSubmittedFence, ringFence);
     }
-    deallocateResources();
+    this->deallocateResources();
     wddm->getWddmInterface()->destroyMonitorFence(ringFence);
 }
 
 template <typename GfxFamily, typename Dispatcher>
-bool WddmDirectSubmission<GfxFamily, Dispatcher>::allocateOsResources(DirectSubmissionAllocations &allocations) {
+bool WddmDirectSubmission<GfxFamily, Dispatcher>::allocateOsResources() {
     //for now only WDDM2.0
     UNRECOVERABLE_IF(wddm->getWddmVersion() != WddmVersion::WDDM_2_0);
 
-    WddmMemoryOperationsHandler *memoryInterface =
-        static_cast<WddmMemoryOperationsHandler *>(device.getRootDeviceEnvironment().memoryOperationsInterface.get());
-
     bool ret = wddm->getWddmInterface()->createMonitoredFence(ringFence);
     ringFence.currentFenceValue = 1;
-    if (ret) {
-        ret = memoryInterface->makeResident(&device, ArrayRef<GraphicsAllocation *>(allocations)) == MemoryOperationsStatus::SUCCESS;
-    }
     perfLogResidencyVariadicLog(wddm->getResidencyLogger(), "ULLS resource allocation finished with: %d\n", ret);
     return ret;
 }
@@ -93,27 +88,13 @@ bool WddmDirectSubmission<GfxFamily, Dispatcher>::handleResidency() {
 }
 
 template <typename GfxFamily, typename Dispatcher>
-uint64_t WddmDirectSubmission<GfxFamily, Dispatcher>::switchRingBuffers() {
-    GraphicsAllocation *nextRingBuffer = switchRingBuffersAllocations();
-    void *flushPtr = ringCommandStream.getSpace(0);
-    uint64_t currentBufferGpuVa = getCommandBufferPositionGpuAddress(flushPtr);
-
-    if (ringStart) {
-        dispatchSwitchRingBufferSection(nextRingBuffer->getGpuAddress());
-        cpuCachelineFlush(flushPtr, getSizeSwitchRingBufferSection());
-    }
-
-    ringCommandStream.replaceBuffer(nextRingBuffer->getUnderlyingBuffer(), ringCommandStream.getMaxAvailableSpace());
-    ringCommandStream.replaceGraphicsAllocation(nextRingBuffer);
-
-    if (ringStart) {
-        if (completionRingBuffers[currentRingBuffer] != 0) {
+void WddmDirectSubmission<GfxFamily, Dispatcher>::handleSwitchRingBuffers() {
+    if (this->ringStart) {
+        if (this->completionRingBuffers[this->currentRingBuffer] != 0) {
             MonitoredFence &currentFence = osContextWin->getResidencyController().getMonitoredFence();
-            handleCompletionRingBuffer(completionRingBuffers[currentRingBuffer], currentFence);
+            handleCompletionRingBuffer(this->completionRingBuffers[this->currentRingBuffer], currentFence);
         }
     }
-
-    return currentBufferGpuVa;
 }
 
 template <typename GfxFamily, typename Dispatcher>
@@ -122,7 +103,7 @@ uint64_t WddmDirectSubmission<GfxFamily, Dispatcher>::updateTagValue() {
 
     currentFence.lastSubmittedFence = currentFence.currentFenceValue;
     currentFence.currentFenceValue++;
-    completionRingBuffers[currentRingBuffer] = currentFence.lastSubmittedFence;
+    this->completionRingBuffers[this->currentRingBuffer] = currentFence.lastSubmittedFence;
 
     return currentFence.lastSubmittedFence;
 }

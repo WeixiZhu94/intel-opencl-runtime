@@ -1,11 +1,12 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2019-2022 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
  */
 
 #pragma once
+#include "shared/source/device_binary_format/elf/elf_decoder.h"
 
 #include <cstdint>
 #include <limits>
@@ -18,10 +19,12 @@ namespace NEO {
 
 class Device;
 class GraphicsAllocation;
+struct KernelDescriptor;
 
 enum class SegmentType : uint32_t {
     Unknown,
     GlobalConstants,
+    GlobalStrings,
     GlobalVariables,
     Instructions,
 };
@@ -77,27 +80,33 @@ struct LinkerInput {
         enum class Type : uint32_t {
             Unknown,
             Address,
+            AddressLow,
             AddressHigh,
-            AddressLow
+            PerThreadPayloadOffset,
+            RelocTypeMax
         };
 
         std::string symbolName;
         uint64_t offset = std::numeric_limits<uint64_t>::max();
         Type type = Type::Unknown;
         SegmentType relocationSegment = SegmentType::Unknown;
-        SegmentType symbolSegment = SegmentType::Unknown;
     };
-
+    using SectionNameToSegmentIdMap = std::unordered_map<std::string, uint32_t>;
     using Relocations = std::vector<RelocationInfo>;
     using SymbolMap = std::unordered_map<std::string, SymbolInfo>;
     using RelocationsPerInstSegment = std::vector<Relocations>;
 
     virtual ~LinkerInput() = default;
 
+    static SegmentType getSegmentForSection(ConstStringRef name);
+
     MOCKABLE_VIRTUAL bool decodeGlobalVariablesSymbolTable(const void *data, uint32_t numEntries);
     MOCKABLE_VIRTUAL bool decodeExportedFunctionsSymbolTable(const void *data, uint32_t numEntries, uint32_t instructionsSegmentId);
     MOCKABLE_VIRTUAL bool decodeRelocationTable(const void *data, uint32_t numEntries, uint32_t instructionsSegmentId);
     void addDataRelocationInfo(const RelocationInfo &relocationInfo);
+
+    void addElfTextSegmentRelocation(RelocationInfo relocationInfo, uint32_t instructionsSegmentId);
+    void decodeElfSymbolTableAndRelocations(Elf::Elf<Elf::EI_CLASS_64> &elf, const SectionNameToSegmentIdMap &nameToSegmentId);
 
     const Traits &getTraits() const {
         return traits;
@@ -109,6 +118,10 @@ struct LinkerInput {
 
     const SymbolMap &getSymbols() const {
         return symbols;
+    }
+
+    void addSymbol(const std::string &symbolName, const SymbolInfo &symbolInfo) {
+        symbols.emplace(std::make_pair(symbolName, symbolInfo));
     }
 
     const RelocationsPerInstSegment &getRelocationsInInstructionSegments() const {
@@ -127,6 +140,8 @@ struct LinkerInput {
         return valid;
     }
 
+    bool undefinedSymbolsAllowed = false;
+
   protected:
     Traits traits;
     SymbolMap symbols;
@@ -137,6 +152,8 @@ struct LinkerInput {
 };
 
 struct Linker {
+    inline static const std::string subDeviceID = "__SubDeviceID";
+
     using RelocationInfo = LinkerInput::RelocationInfo;
 
     struct SegmentInfo {
@@ -163,39 +180,46 @@ struct Linker {
     using RelocatedSymbolsMap = std::unordered_map<std::string, RelocatedSymbol>;
     using PatchableSegments = std::vector<PatchableSegment>;
     using UnresolvedExternals = std::vector<UnresolvedExternal>;
+    using KernelDescriptorsT = std::vector<KernelDescriptor *>;
 
     Linker(const LinkerInput &data)
         : data(data) {
     }
 
-    LinkingStatus link(const SegmentInfo &globalVariablesSegInfo, const SegmentInfo &globalConstantsSegInfo, const SegmentInfo &exportedFunctionsSegInfo,
+    LinkingStatus link(const SegmentInfo &globalVariablesSegInfo, const SegmentInfo &globalConstantsSegInfo, const SegmentInfo &exportedFunctionsSegInfo, const SegmentInfo &globalStringsSegInfo,
                        GraphicsAllocation *globalVariablesSeg, GraphicsAllocation *globalConstantsSeg, const PatchableSegments &instructionsSegments,
-                       UnresolvedExternals &outUnresolvedExternals, Device *pDevice, const void *constantsInitData, const void *variablesInitData) {
+                       UnresolvedExternals &outUnresolvedExternals, Device *pDevice, const void *constantsInitData, const void *variablesInitData, const KernelDescriptorsT &kernelDescriptors) {
         bool success = data.isValid();
         auto initialUnresolvedExternalsCount = outUnresolvedExternals.size();
-        success = success && processRelocations(globalVariablesSegInfo, globalConstantsSegInfo, exportedFunctionsSegInfo);
+        success = success && processRelocations(globalVariablesSegInfo, globalConstantsSegInfo, exportedFunctionsSegInfo, globalStringsSegInfo);
         if (!success) {
             return LinkingStatus::Error;
         }
         patchInstructionsSegments(instructionsSegments, outUnresolvedExternals);
         patchDataSegments(globalVariablesSegInfo, globalConstantsSegInfo, globalVariablesSeg, globalConstantsSeg,
                           outUnresolvedExternals, pDevice, constantsInitData, variablesInitData);
-
+        resolveImplicitArgs(kernelDescriptors, pDevice);
+        resolveBuiltins(pDevice, outUnresolvedExternals, instructionsSegments);
         if (initialUnresolvedExternalsCount < outUnresolvedExternals.size()) {
             return LinkingStatus::LinkedPartially;
         }
         return LinkingStatus::LinkedFully;
     }
-
+    static void patchAddress(void *relocAddress, const RelocatedSymbol &symbol, const RelocationInfo &relocation);
     RelocatedSymbolsMap extractRelocatedSymbols() {
         return RelocatedSymbolsMap(std::move(relocatedSymbols));
     }
+
+    static void applyDebugDataRelocations(const NEO::Elf::Elf<NEO::Elf::EI_CLASS_64> &decodedElf, ArrayRef<uint8_t> inputOutputElf,
+                                          const SegmentInfo &text,
+                                          const SegmentInfo &globalData,
+                                          const SegmentInfo &constData);
 
   protected:
     const LinkerInput &data;
     RelocatedSymbolsMap relocatedSymbols;
 
-    bool processRelocations(const SegmentInfo &globalVariables, const SegmentInfo &globalConstants, const SegmentInfo &exportedFunctions);
+    bool processRelocations(const SegmentInfo &globalVariables, const SegmentInfo &globalConstants, const SegmentInfo &exportedFunctions, const SegmentInfo &globalStrings);
 
     void patchInstructionsSegments(const std::vector<PatchableSegment> &instructionsSegments, std::vector<UnresolvedExternal> &outUnresolvedExternals);
 
@@ -203,9 +227,20 @@ struct Linker {
                            GraphicsAllocation *globalVariablesSeg, GraphicsAllocation *globalConstantsSeg,
                            std::vector<UnresolvedExternal> &outUnresolvedExternals, Device *pDevice,
                            const void *constantsInitData, const void *variablesInitData);
+
+    void resolveImplicitArgs(const KernelDescriptorsT &kernelDescriptors, Device *pDevice);
+    void resolveBuiltins(Device *pDevice, UnresolvedExternals &outUnresolvedExternals, const std::vector<PatchableSegment> &instructionsSegments);
+
+    template <typename PatchSizeT>
+    void patchIncrement(Device *pDevice, GraphicsAllocation *dstAllocation, size_t relocationOffset, const void *initData, uint64_t incrementValue);
+
+    std::unordered_map<uint32_t /*ISA segment id*/, StackVec<uint32_t *, 2> /*implicit args relocation address to patch*/> pImplicitArgsRelocationAddresses;
 };
 
 std::string constructLinkerErrorMessage(const Linker::UnresolvedExternals &unresolvedExternals, const std::vector<std::string> &instructionsSegmentsNames);
 std::string constructRelocationsDebugMessage(const Linker::RelocatedSymbolsMap &relocatedSymbols);
+constexpr bool shouldIgnoreRelocation(const LinkerInput::RelocationInfo &relocation) {
+    return LinkerInput::RelocationInfo::Type::PerThreadPayloadOffset == relocation.type;
+}
 
 } // namespace NEO

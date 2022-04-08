@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -9,11 +9,11 @@
 #include "shared/source/device/device.h"
 #include "shared/source/helpers/aligned_memory.h"
 #include "shared/source/helpers/ptr_math.h"
+#include "shared/test/common/test_macros/test.h"
 
 #include "opencl/source/mem_obj/buffer.h"
 #include "opencl/test/unit_test/aub_tests/command_queue/command_enqueue_fixture.h"
 #include "opencl/test/unit_test/mocks/mock_context.h"
-#include "test.h"
 
 using namespace NEO;
 
@@ -34,7 +34,7 @@ struct WriteBufferRectHw
 typedef WriteBufferRectHw AUBWriteBufferRect;
 static const size_t width = 10;
 
-HWTEST_P(AUBWriteBufferRect, simple3D) {
+HWTEST_P(AUBWriteBufferRect, Given3dWhenWritingBufferThenExpectationsAreMet) {
     MockContext context(this->pClDevice);
     size_t rowPitch = width;
     size_t slicePitch = rowPitch * rowPitch;
@@ -179,7 +179,7 @@ struct AUBWriteBufferRectUnaligned
     }
 };
 
-HWTEST_F(AUBWriteBufferRectUnaligned, misalignedHostPtr) {
+HWTEST_F(AUBWriteBufferRectUnaligned, GivenMisalignedHostPtrWhenWritingBufferThenExpectationsAreMet) {
     const std::vector<size_t> offsets = {0, 1, 2, 3};
     const std::vector<size_t> sizes = {4, 3, 2, 1};
     for (auto offset : offsets) {

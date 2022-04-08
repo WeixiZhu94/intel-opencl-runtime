@@ -1,16 +1,19 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2022 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
  */
 
+#include "shared/test/common/helpers/unit_test_helper.h"
+#include "shared/test/common/libult/ult_command_stream_receiver.h"
+#include "shared/test/common/mocks/mock_gmm_resource_info.h"
+#include "shared/test/common/test_macros/test.h"
+
 #include "opencl/source/helpers/convert_color.h"
 #include "opencl/test/unit_test/command_queue/enqueue_fill_image_fixture.h"
 #include "opencl/test/unit_test/gen_common/gen_commands_common_validation.h"
-#include "opencl/test/unit_test/helpers/unit_test_helper.h"
-#include "opencl/test/unit_test/libult/ult_command_stream_receiver.h"
-#include "test.h"
+#include "opencl/test/unit_test/mocks/mock_command_queue.h"
 
 #include "reg_configs_common.h"
 
@@ -60,7 +63,8 @@ HWCMDTEST_F(IGFX_GEN8_CORE, EnqueueFillImageTest, WhenFillingImageThenGpgpuWalke
 
     // Compute the SIMD lane mask
     size_t simd =
-        cmd->getSimdSize() == GPGPU_WALKER::SIMD_SIZE_SIMD32 ? 32 : cmd->getSimdSize() == GPGPU_WALKER::SIMD_SIZE_SIMD16 ? 16 : 8;
+        cmd->getSimdSize() == GPGPU_WALKER::SIMD_SIZE_SIMD32 ? 32 : cmd->getSimdSize() == GPGPU_WALKER::SIMD_SIZE_SIMD16 ? 16
+                                                                                                                         : 8;
     uint64_t simdMask = maxNBitValue(simd);
 
     // Mask off lanes based on the execution masks
@@ -92,7 +96,7 @@ HWTEST_F(EnqueueFillImageTest, WhenFillingImageThenIndirectDataGetsAdded) {
     auto sshBefore = pSSH->getUsed();
 
     EnqueueFillImageHelper<>::enqueueFillImage(pCmdQ, image);
-    EXPECT_TRUE(UnitTestHelper<FamilyType>::evaluateDshUsage(dshBefore, pDSH->getUsed(), nullptr));
+    EXPECT_TRUE(UnitTestHelper<FamilyType>::evaluateDshUsage(dshBefore, pDSH->getUsed(), nullptr, rootDeviceIndex));
     EXPECT_NE(iohBefore, pIOH->getUsed());
     EXPECT_NE(sshBefore, pSSH->getUsed());
 }
@@ -105,7 +109,11 @@ HWTEST_F(EnqueueFillImageTest, WhenFillingImageThenL3ProgrammingIsCorrect) {
 HWCMDTEST_F(IGFX_GEN8_CORE, EnqueueFillImageTest, WhenEnqueueIsDoneThenStateBaseAddressIsProperlyProgrammed) {
     enqueueFillImage<FamilyType>();
     auto &ultCsr = this->pDevice->getUltCommandStreamReceiver<FamilyType>();
+
+    auto &hwHelper = HwHelper::get(pDevice->getHardwareInfo().platform.eRenderCoreFamily);
+
     validateStateBaseAddress<FamilyType>(ultCsr.getMemoryManager()->getInternalHeapBaseAddress(ultCsr.rootDeviceIndex, pIOH->getGraphicsAllocation()->isAllocatedInLocalMemoryPool()),
+                                         ultCsr.getMemoryManager()->getInternalHeapBaseAddress(ultCsr.rootDeviceIndex, !hwHelper.useSystemMemoryPlacementForISA(pDevice->getHardwareInfo())),
                                          pDSH, pIOH, pSSH, itorPipelineSelect, itorWalker, cmdList, 0llu);
 }
 
@@ -165,19 +173,23 @@ HWCMDTEST_F(IGFX_GEN8_CORE, EnqueueFillImageTest, WhenFillingImageThenInterfaceD
 HWTEST_F(EnqueueFillImageTest, WhenFillingImageThenSurfaceStateIsCorrect) {
     typedef typename FamilyType::RENDER_SURFACE_STATE RENDER_SURFACE_STATE;
 
+    auto mockCmdQ = std::make_unique<MockCommandQueueHw<FamilyType>>(context, pClDevice, nullptr);
+    VariableBackup<CommandQueue *> cmdQBackup(&pCmdQ, mockCmdQ.get());
+    mockCmdQ->storeMultiDispatchInfo = true;
     enqueueFillImage<FamilyType>();
 
-    const auto &surfaceState = getSurfaceState<FamilyType>(&pCmdQ->getIndirectHeap(IndirectHeap::SURFACE_STATE, 0), 0);
+    const auto &kernelInfo = mockCmdQ->storedMultiDispatchInfo.begin()->getKernel()->getKernelInfo();
+    uint32_t index = static_cast<uint32_t>(kernelInfo.getArgDescriptorAt(0).template as<ArgDescImage>().bindful) / sizeof(RENDER_SURFACE_STATE);
+
+    const auto &surfaceState = getSurfaceState<FamilyType>(&pCmdQ->getIndirectHeap(IndirectHeap::Type::SURFACE_STATE, 0), index);
     const auto &imageDesc = image->getImageDesc();
     EXPECT_EQ(imageDesc.image_width, surfaceState.getWidth());
     EXPECT_EQ(imageDesc.image_height, surfaceState.getHeight());
     EXPECT_NE(0u, surfaceState.getSurfacePitch());
     EXPECT_NE(0u, surfaceState.getSurfaceType());
-    EXPECT_EQ(RENDER_SURFACE_STATE::SURFACE_HORIZONTAL_ALIGNMENT_HALIGN_4, surfaceState.getSurfaceHorizontalAlignment());
+    EXPECT_EQ(MockGmmResourceInfo::getHAlignSurfaceStateResult, surfaceState.getSurfaceHorizontalAlignment());
     EXPECT_EQ(RENDER_SURFACE_STATE::SURFACE_VERTICAL_ALIGNMENT_VALIGN_4, surfaceState.getSurfaceVerticalAlignment());
-
-    const auto &srcSurfaceState = getSurfaceState<FamilyType>(&pCmdQ->getIndirectHeap(IndirectHeap::SURFACE_STATE, 0), 0);
-    EXPECT_EQ(image->getGraphicsAllocation(pClDevice->getRootDeviceIndex())->getGpuAddress(), srcSurfaceState.getSurfaceBaseAddress());
+    EXPECT_EQ(image->getGraphicsAllocation(pClDevice->getRootDeviceIndex())->getGpuAddress(), surfaceState.getSurfaceBaseAddress());
 }
 
 HWTEST_F(EnqueueFillImageTest, WhenFillingImageThenNumberOfPipelineSelectsIsOne) {

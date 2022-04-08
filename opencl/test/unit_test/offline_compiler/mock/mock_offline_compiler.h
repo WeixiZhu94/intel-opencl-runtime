@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2022 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -14,26 +14,33 @@ namespace NEO {
 
 class MockOfflineCompiler : public OfflineCompiler {
   public:
+    using OfflineCompiler::appendExtraInternalOptions;
+    using OfflineCompiler::argHelper;
     using OfflineCompiler::deviceName;
     using OfflineCompiler::elfBinary;
+    using OfflineCompiler::excludeIr;
     using OfflineCompiler::fclDeviceCtx;
+    using OfflineCompiler::forceStatelessToStatefulOptimization;
     using OfflineCompiler::genBinary;
     using OfflineCompiler::genBinarySize;
     using OfflineCompiler::generateFilePathForIr;
     using OfflineCompiler::generateOptsSuffix;
-    using OfflineCompiler::getHardwareInfo;
     using OfflineCompiler::getStringWithinDelimiters;
     using OfflineCompiler::hwInfo;
     using OfflineCompiler::igcDeviceCtx;
+    using OfflineCompiler::initHardwareInfo;
     using OfflineCompiler::inputFileLlvm;
     using OfflineCompiler::inputFileSpirV;
     using OfflineCompiler::internalOptions;
+    using OfflineCompiler::irBinary;
+    using OfflineCompiler::irBinarySize;
     using OfflineCompiler::isSpirV;
     using OfflineCompiler::options;
     using OfflineCompiler::outputDirectory;
     using OfflineCompiler::outputFile;
     using OfflineCompiler::parseCommandLine;
     using OfflineCompiler::parseDebugSettings;
+    using OfflineCompiler::setStatelessToStatefullBufferOffsetFlag;
     using OfflineCompiler::sourceCode;
     using OfflineCompiler::storeBinary;
     using OfflineCompiler::updateBuildLog;
@@ -69,6 +76,11 @@ class MockOfflineCompiler : public OfflineCompiler {
     void writeOutAllFiles() override {
         writeOutAllFilesCalled++;
         OfflineCompiler::writeOutAllFiles();
+    }
+
+    void clearLog() {
+        uniqueHelper = std::make_unique<OclocArgHelper>();
+        argHelper = uniqueHelper.get();
     }
 
     int buildSourceCodeStatus = 0;

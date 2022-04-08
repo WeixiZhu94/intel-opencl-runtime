@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019-2020 Intel Corporation
+ * Copyright (C) 2020-2022 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -17,10 +17,7 @@ template <GFXCORE_FAMILY gfxCoreFamily>
 ze_result_t SamplerCoreFamily<gfxCoreFamily>::initialize(Device *device, const ze_sampler_desc_t *desc) {
     using SAMPLER_STATE = typename GfxFamily::SAMPLER_STATE;
 
-    ze_result_t ret = BaseClass::initialize(device, desc);
-    if (ret != ZE_RESULT_SUCCESS) {
-        return ret;
-    }
+    BaseClass::initialize(device, desc);
 
     samplerState.setNonNormalizedCoordinateEnable(!desc->isNormalized);
 
@@ -30,9 +27,9 @@ ze_result_t SamplerCoreFamily<gfxCoreFamily>::initialize(Device *device, const z
 
     switch (desc->addressMode) {
     case ZE_SAMPLER_ADDRESS_MODE_NONE:
-    case ZE_SAMPLER_ADDRESS_MODE_CLAMP:
-        break;
     case ZE_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER:
+        break;
+    case ZE_SAMPLER_ADDRESS_MODE_CLAMP:
         addressControlModeX = SAMPLER_STATE::TEXTURE_COORDINATE_MODE_CLAMP;
         addressControlModeY = SAMPLER_STATE::TEXTURE_COORDINATE_MODE_CLAMP;
         addressControlModeZ = SAMPLER_STATE::TEXTURE_COORDINATE_MODE_CLAMP;

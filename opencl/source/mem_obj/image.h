@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -9,8 +9,8 @@
 #include "shared/source/helpers/string.h"
 #include "shared/source/image/image_surface_state.h"
 
+#include "opencl/source/helpers/cl_validators.h"
 #include "opencl/source/helpers/surface_formats.h"
-#include "opencl/source/helpers/validators.h"
 #include "opencl/source/mem_obj/buffer.h"
 #include "opencl/source/mem_obj/mem_obj.h"
 
@@ -135,10 +135,10 @@ class Image : public MemObj {
                         void *paramValue,
                         size_t *paramValueSizeRet);
 
-    virtual void setImageArg(void *memory, bool isMediaBlockImage, uint32_t mipLevel, uint32_t rootDeviceIndex) = 0;
+    virtual void setImageArg(void *memory, bool isMediaBlockImage, uint32_t mipLevel, uint32_t rootDeviceIndex, bool useGlobalAtomics) = 0;
     virtual void setMediaImageArg(void *memory, uint32_t rootDeviceIndex) = 0;
     virtual void setMediaSurfaceRotation(void *memory) = 0;
-    virtual void setSurfaceMemoryObjectControlStateIndexToMocsTable(void *memory, uint32_t value) = 0;
+    virtual void setSurfaceMemoryObjectControlState(void *memory, uint32_t value) = 0;
 
     const cl_image_desc &getImageDesc() const;
     const cl_image_format &getImageFormat() const;
@@ -147,7 +147,6 @@ class Image : public MemObj {
     void transferDataToHostPtr(MemObjSizeArray &copySize, MemObjOffsetArray &copyOffset) override;
     void transferDataFromHostPtr(MemObjSizeArray &copySize, MemObjOffsetArray &copyOffset) override;
 
-    static bool isFormatRedescribable(cl_image_format format);
     Image *redescribe();
     Image *redescribeFillImage();
     ImageCreatFunc createFunction;
@@ -183,7 +182,7 @@ class Image : public MemObj {
     static const ClSurfaceFormatInfo *getSurfaceFormatFromTable(cl_mem_flags flags, const cl_image_format *imageFormat, bool supportsOcl20Features);
     static cl_int validateRegionAndOrigin(const size_t *origin, const size_t *region, const cl_image_desc &imgDesc);
 
-    cl_int writeNV12Planes(const void *hostPtr, size_t hostPtrRowPitch);
+    cl_int writeNV12Planes(const void *hostPtr, size_t hostPtrRowPitch, uint32_t rootDeviceIndex);
     void setMcsSurfaceInfo(const McsSurfaceInfo &info) { mcsSurfaceInfo = info; }
     const McsSurfaceInfo &getMcsSurfaceInfo() { return mcsSurfaceInfo; }
     size_t calculateOffsetForMapping(const MemObjOffsetArray &origin) const override;
@@ -199,12 +198,15 @@ class Image : public MemObj {
 
     static cl_int checkIfDeviceSupportsImages(cl_context context);
 
+    void fillImageRegion(size_t *region) const;
+
   protected:
     Image(Context *context,
           const MemoryProperties &memoryProperties,
           cl_mem_flags flags,
           cl_mem_flags_intel flagsIntel,
           size_t size,
+          void *memoryStorage,
           void *hostPtr,
           cl_image_format imageFormat,
           const cl_image_desc &imageDesc,
@@ -218,9 +220,9 @@ class Image : public MemObj {
 
     void getOsSpecificImageInfo(const cl_mem_info &paramName, size_t *srcParamSize, void **srcParam);
 
-    void transferData(void *dst, size_t dstRowPitch, size_t dstSlicePitch,
-                      void *src, size_t srcRowPitch, size_t srcSlicePitch,
-                      std::array<size_t, 3> copyRegion, std::array<size_t, 3> copyOrigin);
+    MOCKABLE_VIRTUAL void transferData(void *dst, size_t dstRowPitch, size_t dstSlicePitch,
+                                       void *src, size_t srcRowPitch, size_t srcSlicePitch,
+                                       std::array<size_t, 3> copyRegion, std::array<size_t, 3> copyOrigin);
 
     cl_image_format imageFormat;
     cl_image_desc imageDesc;
@@ -261,6 +263,7 @@ class ImageHw : public Image {
             cl_mem_flags flags,
             cl_mem_flags_intel flagsIntel,
             size_t size,
+            void *memoryStorage,
             void *hostPtr,
             const cl_image_format &imageFormat,
             const cl_image_desc &imageDesc,
@@ -271,7 +274,7 @@ class ImageHw : public Image {
             uint32_t mipCount,
             const ClSurfaceFormatInfo &surfaceFormatInfo,
             const SurfaceOffsets *surfaceOffsets = nullptr)
-        : Image(context, memoryProperties, flags, flagsIntel, size, hostPtr, imageFormat, imageDesc,
+        : Image(context, memoryProperties, flags, flagsIntel, size, memoryStorage, hostPtr, imageFormat, imageDesc,
                 zeroCopy, std::move(multiGraphicsAllocation), isObjectRedescribed, baseMipLevel, mipCount, surfaceFormatInfo, surfaceOffsets) {
         if (getImageDesc().image_type == CL_MEM_OBJECT_IMAGE1D ||
             getImageDesc().image_type == CL_MEM_OBJECT_IMAGE1D_BUFFER ||
@@ -298,13 +301,12 @@ class ImageHw : public Image {
         }
     }
 
-    void setImageArg(void *memory, bool setAsMediaBlockImage, uint32_t mipLevel, uint32_t rootDeviceIndex) override;
+    void setImageArg(void *memory, bool setAsMediaBlockImage, uint32_t mipLevel, uint32_t rootDeviceIndex, bool useGlobalAtomics) override;
     void setAuxParamsForMultisamples(RENDER_SURFACE_STATE *surfaceState);
-    MOCKABLE_VIRTUAL void setAuxParamsForMCSCCS(RENDER_SURFACE_STATE *surfaceState, Gmm *gmm);
     void setMediaImageArg(void *memory, uint32_t rootDeviceIndex) override;
     void setMediaSurfaceRotation(void *memory) override;
-    void setSurfaceMemoryObjectControlStateIndexToMocsTable(void *memory, uint32_t value) override;
-    void appendSurfaceStateParams(RENDER_SURFACE_STATE *surfaceState, uint32_t rootDeviceIndex);
+    void setSurfaceMemoryObjectControlState(void *memory, uint32_t value) override;
+    void appendSurfaceStateParams(RENDER_SURFACE_STATE *surfaceState, uint32_t rootDeviceIndex, bool useGlobalAtomics);
     void appendSurfaceStateDepthParams(RENDER_SURFACE_STATE *surfaceState, Gmm *gmm);
     void appendSurfaceStateExt(void *memory);
     void transformImage2dArrayTo3d(void *memory) override;
@@ -325,11 +327,13 @@ class ImageHw : public Image {
                          const ClSurfaceFormatInfo *surfaceFormatInfo,
                          const SurfaceOffsets *surfaceOffsets) {
         UNRECOVERABLE_IF(surfaceFormatInfo == nullptr);
+        auto memoryStorage = multiGraphicsAllocation.getDefaultGraphicsAllocation()->getUnderlyingBuffer();
         return new ImageHw<GfxFamily>(context,
                                       memoryProperties,
                                       flags,
                                       flagsIntel,
                                       size,
+                                      memoryStorage,
                                       hostPtr,
                                       imageFormat,
                                       imageDesc,

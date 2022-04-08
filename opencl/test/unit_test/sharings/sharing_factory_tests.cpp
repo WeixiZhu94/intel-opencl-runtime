@@ -1,22 +1,22 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
  */
 
 #include "shared/source/command_stream/command_stream_receiver.h"
+#include "shared/source/compiler_interface/oclc_extensions.h"
 #include "shared/source/device/device.h"
 #include "shared/source/helpers/string.h"
-#include "shared/test/unit_test/helpers/debug_manager_state_restore.h"
-#include "shared/test/unit_test/mocks/mock_device.h"
+#include "shared/test/common/fixtures/memory_management_fixture.h"
+#include "shared/test/common/helpers/debug_manager_state_restore.h"
+#include "shared/test/common/mocks/mock_device.h"
 
 #include "opencl/source/context/context.h"
-#include "opencl/source/platform/extensions.h"
 #include "opencl/source/platform/platform.h"
 #include "opencl/source/sharings/sharing.h"
 #include "opencl/source/sharings/sharing_factory.h"
-#include "opencl/test/unit_test/fixtures/memory_management_fixture.h"
 #include "opencl/test/unit_test/mocks/mock_cl_device.h"
 #include "opencl/test/unit_test/mocks/mock_context.h"
 #include "opencl/test/unit_test/mocks/mock_platform.h"
@@ -94,11 +94,11 @@ class MockSharingContextBuilder : public SharingContextBuilder {
     cl_context_properties value;
 
   public:
-    bool processProperties(cl_context_properties &propertyType, cl_context_properties &propertyValue, cl_int &errcodeRet) override;
+    bool processProperties(cl_context_properties &propertyType, cl_context_properties &propertyValue) override;
     bool finalizeProperties(Context &context, int32_t &errcodeRet) override;
 };
 
-bool MockSharingContextBuilder::processProperties(cl_context_properties &propertyType, cl_context_properties &propertyValue, cl_int &errcodeRet) {
+bool MockSharingContextBuilder::processProperties(cl_context_properties &propertyType, cl_context_properties &propertyValue) {
     if (propertyType == clContextPropertyMock) {
         if (propertyValue) {
             value = propertyValue;
@@ -169,8 +169,8 @@ TEST(SharingFactoryTests, givenFactoryWithSharingWhenAskedForExtensionThenString
     stateRestore.registerSharing<TestedSharingBuilderFactory>(SharingType::CLGL_SHARING);
 
     auto ext = stateRestore.getExtensions(nullptr);
-    EXPECT_EQ(TestedSharingBuilderFactory::extension.length(), ext.length());
-    EXPECT_STREQ(TestedSharingBuilderFactory::extension.c_str(), ext.c_str());
+    EXPECT_LE(TestedSharingBuilderFactory::extension.length(), ext.length());
+    EXPECT_THAT(ext.c_str(), ::testing::HasSubstr(TestedSharingBuilderFactory::extension.c_str()));
 }
 
 TEST(SharingFactoryTests, givenFactoryWithSharingWhenDispatchFillRequestedThenMethodsAreInvoked) {

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -9,11 +9,10 @@
 #include "shared/source/built_ins/built_ins.h"
 #include "shared/source/command_stream/preemption.h"
 #include "shared/source/helpers/preamble.h"
-#include "shared/test/unit_test/cmd_parse/hw_parse.h"
-#include "shared/test/unit_test/mocks/mock_device.h"
-
-#include "opencl/test/unit_test/mocks/mock_graphics_allocation.h"
-#include "test.h"
+#include "shared/test/common/cmd_parse/hw_parse.h"
+#include "shared/test/common/mocks/mock_device.h"
+#include "shared/test/common/mocks/mock_graphics_allocation.h"
+#include "shared/test/common/test_macros/test.h"
 
 #include <gtest/gtest.h>
 

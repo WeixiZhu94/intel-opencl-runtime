@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019-2020 Intel Corporation
+ * Copyright (C) 2020-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -13,8 +13,8 @@ namespace L0 {
 
 thread_local ze_bool_t tracingInProgress = 0;
 
-struct APITracerContextImp GLOBAL_APITracerContextImp;
-struct APITracerContextImp *PGLOBAL_APITracerContextImp = &GLOBAL_APITracerContextImp;
+struct APITracerContextImp globalAPITracerContextImp;
+struct APITracerContextImp *pGlobalAPITracerContextImp = &globalAPITracerContextImp;
 
 APITracer *APITracer::create() {
     APITracerImp *tracer = new APITracerImp;
@@ -24,9 +24,9 @@ APITracer *APITracer::create() {
     return tracer;
 }
 
-ze_result_t createAPITracer(zet_driver_handle_t hDriver, const zet_tracer_desc_t *desc, zet_tracer_handle_t *phTracer) {
+ze_result_t createAPITracer(zet_context_handle_t hContext, const zet_tracer_exp_desc_t *desc, zet_tracer_exp_handle_t *phTracer) {
 
-    if (!PGLOBAL_APITracerContextImp->isTracingEnabled()) {
+    if (!pGlobalAPITracerContextImp->isTracingEnabled()) {
         return ZE_RESULT_ERROR_UNINITIALIZED;
     }
 
@@ -38,11 +38,22 @@ ze_result_t createAPITracer(zet_driver_handle_t hDriver, const zet_tracer_desc_t
     return ZE_RESULT_SUCCESS;
 }
 
-ze_result_t APITracerImp::destroyTracer(zet_tracer_handle_t phTracer) {
+// This destructor will be called only during at-exit processing,
+// Hence, this function is executing in a single threaded environment,
+// and requires no mutex.
+APITracerContextImp::~APITracerContextImp() {
+    std::list<ThreadPrivateTracerData *>::iterator itr = threadTracerDataList.begin();
+    while (itr != threadTracerDataList.end()) {
+        (*itr)->clearThreadTracerDataOnList();
+        itr = threadTracerDataList.erase(itr);
+    }
+}
+
+ze_result_t APITracerImp::destroyTracer(zet_tracer_exp_handle_t phTracer) {
 
     APITracerImp *tracer = static_cast<APITracerImp *>(phTracer);
 
-    ze_result_t result = PGLOBAL_APITracerContextImp->finalizeDisableImpTracingWait(tracer);
+    ze_result_t result = pGlobalAPITracerContextImp->finalizeDisableImpTracingWait(tracer);
     if (result == ZE_RESULT_SUCCESS) {
         delete L0::APITracer::fromHandle(phTracer);
     }
@@ -72,64 +83,53 @@ ze_result_t APITracerImp::setEpilogues(zet_core_callbacks_t *pCoreCbs) {
 }
 
 ze_result_t APITracerImp::enableTracer(ze_bool_t enable) {
-    return PGLOBAL_APITracerContextImp->enableTracingImp(this, enable);
+    return pGlobalAPITracerContextImp->enableTracingImp(this, enable);
 }
 
-static std::mutex perThreadTracerDataMutex;
-
-static std::list<per_thread_tracer_data_t *> perThreadTracerDataList;
-
-void ThreadPrivateTracerData::allocatePerThreadPublicTracerData() {
-    if (myThreadPublicTracerData == nullptr) {
-        myThreadPublicTracerData = new per_thread_tracer_data_t;
-        myThreadPublicTracerData->tracerArrayPointer.store(NULL, std::memory_order_relaxed);
-        myThreadPublicTracerData->thread_id = std::this_thread::get_id();
-        std::lock_guard<std::mutex> lock(perThreadTracerDataMutex);
-        perThreadTracerDataList.push_back(myThreadPublicTracerData);
-    }
+void APITracerContextImp::addThreadTracerDataToList(ThreadPrivateTracerData *threadDataP) {
+    std::lock_guard<std::mutex> lock(threadTracerDataListMutex);
+    threadTracerDataList.push_back(threadDataP);
 }
 
-void ThreadPrivateTracerData::freePerThreadPublicTracerData() {
-    //
-    // There is no need to hold a mutex when testing
-    // my_thread_tracer_data is a thread_local object.
-    // my_threadd_tracer_data for nullptr since it can only be done
-    // within the current thread's context.
-    // So there can be no other racing threads.
-    //
-    if (myThreadPublicTracerData != nullptr) {
-        std::lock_guard<std::mutex> lock(perThreadTracerDataMutex);
-        perThreadTracerDataList.remove(myThreadPublicTracerData);
-        delete myThreadPublicTracerData;
-        myThreadPublicTracerData = nullptr;
-    }
-}
-
-ThreadPrivateTracerData::ThreadPrivateTracerData() {
-    myThreadPublicTracerData = nullptr;
-}
-
-ThreadPrivateTracerData::~ThreadPrivateTracerData() {
-    freePerThreadPublicTracerData();
+void APITracerContextImp::removeThreadTracerDataFromList(ThreadPrivateTracerData *threadDataP) {
+    std::lock_guard<std::mutex> lock(threadTracerDataListMutex);
+    if (threadTracerDataList.empty())
+        return;
+    threadTracerDataList.remove(threadDataP);
 }
 
 thread_local ThreadPrivateTracerData myThreadPrivateTracerData;
 
-//
-// This thread_local allows for an optimisation of the test_for_tracer_array_references()
-// function.  The optimization adds a test and branch, but it allows the common code path
-// to avoid TWO out of line function calls.
-//
-// One function call is to call the constructor for the thread_private_tracer_data class.
-// Note that this call is probably pretty heavy-weight, because it needs to be thread safe.
-// It MUST include a mutex.
-//
-// The second function call we avoid is the call to the thread_private_tracer_data class's
-// allocate memory member. It appears that at least with the Linux g++ compiler,
-// the "inline" annotation on a member function is accepted at compile time, but does not
-// change the code that is generated.
-//
-static thread_local bool myThreadPrivateTracerDataIsInitialized = false;
+ThreadPrivateTracerData::ThreadPrivateTracerData() {
+    isInitialized = false;
+    onList = false;
+    tracerArrayPointer.store(nullptr, std::memory_order_relaxed);
+}
+
+ThreadPrivateTracerData::~ThreadPrivateTracerData() {
+    if (onList) {
+        globalAPITracerContextImp.removeThreadTracerDataFromList(this);
+        onList = false;
+    }
+    tracerArrayPointer.store(nullptr, std::memory_order_relaxed);
+}
+
+void ThreadPrivateTracerData::removeThreadTracerDataFromList(void) {
+    if (onList) {
+        globalAPITracerContextImp.removeThreadTracerDataFromList(this);
+        onList = false;
+    }
+    tracerArrayPointer.store(nullptr, std::memory_order_relaxed);
+}
+
+bool ThreadPrivateTracerData::testAndSetThreadTracerDataInitializedAndOnList(void) {
+    if (!isInitialized) {
+        isInitialized = true;
+        onList = true;
+        globalAPITracerContextImp.addThreadTracerDataToList(&myThreadPrivateTracerData);
+    }
+    return onList;
+}
 
 bool APITracerContextImp::isTracingEnabled() { return driver_ddiTable.enableTracing; }
 
@@ -140,10 +140,10 @@ bool APITracerContextImp::isTracingEnabled() { return driver_ddiTable.enableTrac
 // Return 1 if a reference is found.  Otherwise return 0.
 //
 ze_bool_t APITracerContextImp::testForTracerArrayReferences(tracer_array_t *tracerArray) {
-    std::lock_guard<std::mutex> lock(perThreadTracerDataMutex);
-    std::list<per_thread_tracer_data_t *>::iterator itr;
-    for (itr = perThreadTracerDataList.begin();
-         itr != perThreadTracerDataList.end();
+    std::lock_guard<std::mutex> lock(threadTracerDataListMutex);
+    std::list<ThreadPrivateTracerData *>::iterator itr;
+    for (itr = threadTracerDataList.begin();
+         itr != threadTracerDataList.end();
          itr++) {
         if ((*itr)->tracerArrayPointer.load(std::memory_order_relaxed) == tracerArray)
             return 1;
@@ -172,7 +172,7 @@ size_t APITracerContextImp::testAndFreeRetiredTracers() {
     return this->retiringTracerArrayList.size();
 }
 
-int APITracerContextImp::updateTracerArrays() {
+size_t APITracerContextImp::updateTracerArrays() {
     tracer_array_t *newTracerArray;
     size_t newTracerArrayCount = this->enabledTracerImpList.size();
 
@@ -211,9 +211,7 @@ int APITracerContextImp::updateTracerArrays() {
     // from this thread to the tracing threads.
     //
     activeTracerArray.store(newTracerArray, std::memory_order_release);
-    testAndFreeRetiredTracers();
-
-    return 0;
+    return testAndFreeRetiredTracers();
 }
 
 ze_result_t APITracerContextImp::enableTracingImp(struct APITracerImp *tracerImp, ze_bool_t enable) {
@@ -233,13 +231,14 @@ ze_result_t APITracerContextImp::enableTracingImp(struct APITracerImp *tracerImp
         if (!enable) {
             enabledTracerImpList.remove(tracerImp);
             tracerImp->tracingState = disabledWaitingState;
-            updateTracerArrays();
+            if (updateTracerArrays() == 0)
+                tracerImp->tracingState = disabledState;
         }
         result = ZE_RESULT_SUCCESS;
         break;
 
     case disabledWaitingState:
-        result = ZE_RESULT_ERROR_UNINITIALIZED;
+        result = ZE_RESULT_ERROR_HANDLE_OBJECT_IN_USE;
         break;
 
     default:
@@ -273,7 +272,7 @@ ze_result_t APITracerContextImp::finalizeDisableImpTracingWait(struct APITracerI
         break;
 
     case enabledState:
-        result = ZE_RESULT_ERROR_UNINITIALIZED;
+        result = ZE_RESULT_ERROR_HANDLE_OBJECT_IN_USE;
         break;
 
     case disabledWaitingState:
@@ -293,50 +292,24 @@ ze_result_t APITracerContextImp::finalizeDisableImpTracingWait(struct APITracerI
     return result;
 }
 
-//
-// For an explanation of this function and the reason for its while loop,
-// see the comments at the top of this file.
-//
 void *APITracerContextImp::getActiveTracersList() {
-    tracer_array_t *stableTracerArray = NULL;
-    //
-    // This test and branch allows us to avoid TWO function calls.  One call is for the
-    // constructor for my_thread_private_tracer_data.  The other is to avoid the function
-    // call to allocate_per_thread_tracer_data().
-    //
-    // Since my_thread_private_tracer_data_is_initialized and my_thread_private_tracer_data are
-    // thread_local, there is no thread safety issue here. Each thread will find
-    // my_thread_private_tracer_data_is_initialized to be "false" at most once.
-    //
-    if (!myThreadPrivateTracerDataIsInitialized) {
-        myThreadPrivateTracerData.allocatePerThreadPublicTracerData();
-        myThreadPrivateTracerDataIsInitialized = true;
-    }
-    if (myThreadPrivateTracerData.myThreadPublicTracerData == nullptr) {
+    tracer_array_t *stableTracerArray = nullptr;
+
+    if (!myThreadPrivateTracerData.testAndSetThreadTracerDataInitializedAndOnList()) {
         return nullptr;
     }
+
     do {
-        //
-        // This read of active_tracer_array DOES logically signal a transfer
-        // of tracer structure information from the threader enable/disable/destroy
-        // thread to this tracing thread.  So it must use memory_order_acquire
-        //
-        stableTracerArray = PGLOBAL_APITracerContextImp->activeTracerArray.load(std::memory_order_acquire);
-        myThreadPrivateTracerData.myThreadPublicTracerData->tracerArrayPointer.store(stableTracerArray, std::memory_order_relaxed);
-        //
-        // This read of active_tracer_array does NOT transfer any information
-        // that was not already transferred by the previous read within this loop.
-        // So it can use memory_order_relaxed.
-        //
+        stableTracerArray = pGlobalAPITracerContextImp->activeTracerArray.load(std::memory_order_acquire);
+        myThreadPrivateTracerData.tracerArrayPointer.store(stableTracerArray, std::memory_order_relaxed);
     } while (stableTracerArray !=
-             PGLOBAL_APITracerContextImp->activeTracerArray.load(std::memory_order_relaxed));
+             pGlobalAPITracerContextImp->activeTracerArray.load(std::memory_order_relaxed));
     return (void *)stableTracerArray;
 }
 
 void APITracerContextImp::releaseActivetracersList() {
-    if (myThreadPrivateTracerData.myThreadPublicTracerData) {
-        myThreadPrivateTracerData.myThreadPublicTracerData->tracerArrayPointer.store(NULL, std::memory_order_relaxed);
-    }
+    if (myThreadPrivateTracerData.testAndSetThreadTracerDataInitializedAndOnList())
+        myThreadPrivateTracerData.tracerArrayPointer.store(nullptr, std::memory_order_relaxed);
 }
 
 } // namespace L0

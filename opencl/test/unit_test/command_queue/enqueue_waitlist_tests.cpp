@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -59,7 +59,7 @@ struct EnqueueWaitlistTest : public EnqueueWaitlistFixture,
     void SetUp() override {
         EnqueueWaitlistFixture::SetUp();
         buffer = BufferHelper<>::create();
-        bufferNonZeroCopy = new UnalignedBuffer;
+        bufferNonZeroCopy = new UnalignedBuffer(BufferDefaults::context, &bufferNonZeroCopyAlloc);
         image = Image1dHelper<>::create(BufferDefaults::context);
         imageNonZeroCopy = ImageHelper<ImageUseHostPtr<Image1dDefaults>>::create(BufferDefaults::context);
     }
@@ -75,6 +75,7 @@ struct EnqueueWaitlistTest : public EnqueueWaitlistFixture,
     cl_int retVal = CL_SUCCESS;
     cl_int error = CL_SUCCESS;
 
+    MockGraphicsAllocation bufferNonZeroCopyAlloc{nullptr, MemoryConstants::pageSize};
     Buffer *buffer;
     Buffer *bufferNonZeroCopy;
     Image *image;
@@ -87,7 +88,7 @@ struct EnqueueWaitlistTest : public EnqueueWaitlistFixture,
     static void EnqueueNDRange(EnqueueWaitlistTest *test, cl_uint numWaits, cl_event *waits, cl_event *outEvent, bool blocking = false) {
         size_t threadNum = 10;
         size_t threads[1] = {threadNum};
-        cl_int error = clEnqueueNDRangeKernel(test->pCmdQ, test->pKernel, 1, NULL, threads, threads, numWaits, waits, outEvent);
+        cl_int error = clEnqueueNDRangeKernel(test->pCmdQ, test->pMultiDeviceKernel, 1, NULL, threads, threads, numWaits, waits, outEvent);
         test->test_error(error, "Unable to execute kernel");
         return;
     }
@@ -164,7 +165,7 @@ struct EnqueueWaitlistTest : public EnqueueWaitlistFixture,
     }
 };
 
-TEST_P(EnqueueWaitlistTest, BlockingWaitlist) {
+TEST_P(EnqueueWaitlistTest, GivenCompletedUserEventOnWaitlistWhenWaitingForOutputEventThenOutputEventIsCompleted) {
 
     // Set up a user event, which we use as a gate for the second event
     clEventWrapper gateEvent = clCreateUserEvent(context, &error);
@@ -186,7 +187,7 @@ TEST_P(EnqueueWaitlistTest, BlockingWaitlist) {
 }
 
 typedef EnqueueWaitlistTest EnqueueWaitlistTestTwoMapEnqueues;
-TEST_P(EnqueueWaitlistTestTwoMapEnqueues, TestPreviousVirtualEvent) {
+TEST_P(EnqueueWaitlistTestTwoMapEnqueues, GivenCompletedUserEventOnWaitlistWhenWaitingForOutputEventThenOutputEventIsCompleted) {
 
     // Set up a user event, which we use as a gate for the second event
     clEventWrapper gateEvent = clCreateUserEvent(context, &error);
@@ -206,7 +207,7 @@ TEST_P(EnqueueWaitlistTestTwoMapEnqueues, TestPreviousVirtualEvent) {
     test_error(error, "Unable to wait for actual test event");
 }
 
-TEST_P(EnqueueWaitlistTest, BlockingWaitlistNoOutEvent) {
+TEST_P(EnqueueWaitlistTest, GivenCompletedUserEventOnWaitlistWhenFinishingCommandQueueThenSuccessIsReturned) {
 
     // Set up a user event, which we use as a gate for the second event
     clEventWrapper gateEvent = clCreateUserEvent(context, &error);

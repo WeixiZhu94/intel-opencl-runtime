@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019-2020 Intel Corporation
+ * Copyright (C) 2019-2022 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -405,7 +405,6 @@ void dump(const SPatchExecutionEnvironment &value, std::stringstream &out, const
     out << indent << "    uint32_t    CompiledSIMD8;// = " << value.CompiledSIMD8 << "\n";
     out << indent << "    uint32_t    CompiledSIMD16;// = " << value.CompiledSIMD16 << "\n";
     out << indent << "    uint32_t    CompiledSIMD32;// = " << value.CompiledSIMD32 << "\n";
-    out << indent << "    uint32_t    HasDeviceEnqueue;// = " << value.HasDeviceEnqueue << "\n";
     out << indent << "    uint32_t    MayAccessUndeclaredResource;// = " << value.MayAccessUndeclaredResource << "\n";
     out << indent << "    uint32_t    UsesFencesForReadWriteImages;// = " << value.UsesFencesForReadWriteImages << "\n";
     out << indent << "    uint32_t    UsesStatelessSpillFill;// = " << value.UsesStatelessSpillFill << "\n";
@@ -418,6 +417,7 @@ void dump(const SPatchExecutionEnvironment &value, std::stringstream &out, const
     out << indent << "    uint32_t    NumGRFRequired;// = " << value.NumGRFRequired << "\n";
     out << indent << "    uint32_t    WorkgroupWalkOrderDims;// = " << value.WorkgroupWalkOrderDims << "\n";
     out << indent << "    uint32_t    HasGlobalAtomics;// = " << value.HasGlobalAtomics << "\n";
+    out << indent << "    uint32_t    HasStackCalls;// = " << value.HasStackCalls << "\n";
     out << indent << "}\n";
 }
 
@@ -565,6 +565,7 @@ void dump(const SPatchAllocateStatelessPrivateSurface &value, std::stringstream 
     out << indent << "    uint32_t   DataParamOffset;// = " << value.DataParamOffset << "\n";
     out << indent << "    uint32_t   DataParamSize;// = " << value.DataParamSize << "\n";
     out << indent << "    uint32_t   PerThreadPrivateMemorySize;// = " << value.PerThreadPrivateMemorySize << "\n";
+    out << indent << "    uint32_t   IsSimtThread;// = " << value.IsSimtThread << "\n";
     out << indent << "}\n";
 }
 

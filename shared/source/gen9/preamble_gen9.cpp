@@ -1,12 +1,12 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
  */
 
 #include "shared/source/command_stream/csr_definitions.h"
-#include "shared/source/helpers/preamble_bdw_plus.inl"
+#include "shared/source/helpers/preamble_bdw_and_later.inl"
 
 namespace NEO {
 
@@ -51,21 +51,16 @@ void PreambleHelper<SKLFamily>::programPipelineSelect(LinearStream *pCommandStre
 }
 
 template <>
-void PreambleHelper<SKLFamily>::addPipeControlBeforeVfeCmd(LinearStream *pCommandStream, const HardwareInfo *hwInfo, aub_stream::EngineType engineType) {
+void PreambleHelper<SKLFamily>::addPipeControlBeforeVfeCmd(LinearStream *pCommandStream, const HardwareInfo *hwInfo, EngineGroupType engineGroupType) {
     auto pipeControl = pCommandStream->getSpaceForCmd<PIPE_CONTROL>();
     PIPE_CONTROL cmd = SKLFamily::cmdInitPipeControl;
     cmd.setCommandStreamerStallEnable(true);
-    if (hwInfo->workaroundTable.waSendMIFLUSHBeforeVFE) {
+    if (hwInfo->workaroundTable.flags.waSendMIFLUSHBeforeVFE) {
         cmd.setRenderTargetCacheFlushEnable(true);
         cmd.setDepthCacheFlushEnable(true);
         cmd.setDcFlushEnable(true);
     }
     *pipeControl = cmd;
-}
-
-template <>
-uint32_t PreambleHelper<SKLFamily>::getDefaultThreadArbitrationPolicy() {
-    return ThreadArbitrationPolicy::RoundRobin;
 }
 
 template <>
@@ -77,11 +72,10 @@ void PreambleHelper<SKLFamily>::programThreadArbitration(LinearStream *pCommandS
     cmd.setCommandStreamerStallEnable(true);
     *pipeControl = cmd;
 
-    auto pCmd = pCommandStream->getSpaceForCmd<MI_LOAD_REGISTER_IMM>();
-    MI_LOAD_REGISTER_IMM lriCmd = SKLFamily::cmdInitLoadRegisterImm;
-    lriCmd.setRegisterOffset(DebugControlReg2::address);
-    lriCmd.setDataDword(DebugControlReg2::getRegData(requiredThreadArbitrationPolicy));
-    *pCmd = lriCmd;
+    LriHelper<SKLFamily>::program(pCommandStream,
+                                  DebugControlReg2::address,
+                                  DebugControlReg2::getRegData(requiredThreadArbitrationPolicy),
+                                  false);
 }
 
 template <>
@@ -89,5 +83,13 @@ size_t PreambleHelper<SKLFamily>::getThreadArbitrationCommandsSize() {
     return sizeof(MI_LOAD_REGISTER_IMM) + sizeof(PIPE_CONTROL);
 }
 
+template <>
+std::vector<uint32_t> PreambleHelper<SKLFamily>::getSupportedThreadArbitrationPolicies() {
+    std::vector<uint32_t> retVal;
+    for (const uint32_t &p : DebugControlReg2::supportedArbitrationPolicy) {
+        retVal.push_back(p);
+    }
+    return retVal;
+}
 template struct PreambleHelper<SKLFamily>;
 } // namespace NEO

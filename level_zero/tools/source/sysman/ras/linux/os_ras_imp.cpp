@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 Intel Corporation
+ * Copyright (C) 2020-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -11,43 +11,41 @@
 
 namespace L0 {
 
-const std::string LinuxRasImp::rasCounterDir("/var/lib/libze_intel_gpu/");
-const std::string LinuxRasImp::resetCounter("ras_reset_count");
-const std::string LinuxRasImp::resetCounterFile = rasCounterDir + resetCounter;
+void OsRas::getSupportedRasErrorTypes(std::set<zes_ras_error_type_t> &errorType, OsSysman *pOsSysman, ze_device_handle_t deviceHandle) {}
 
-void LinuxRasImp::setRasErrorType(zet_ras_error_type_t type) {
-    osRasErrorType = type;
-}
-bool LinuxRasImp::isRasSupported(void) {
-    if (false == pFsAccess->fileExists(rasCounterDir)) {
-        return false;
-    }
-    if (osRasErrorType == ZET_RAS_ERROR_TYPE_CORRECTABLE) {
-        return false;
-    } else {
-        // i915 support for UNCORRECTABLE errors is assumed true
-        // since support for reset event is already available.
-        return true;
-    }
-}
-ze_result_t LinuxRasImp::getCounterValues(zet_ras_details_t *pDetails) {
-    uint64_t counterValue = 0;
-    ze_result_t result = pFsAccess->read(resetCounterFile, counterValue);
-    if (ZE_RESULT_SUCCESS != result) {
-        return result;
-    }
-    pDetails->numResets = counterValue;
-    return result;
+ze_result_t LinuxRasImp::osRasGetState(zes_ras_state_t &state, ze_bool_t clear) {
+    return ZE_RESULT_ERROR_UNSUPPORTED_FEATURE;
 }
 
-LinuxRasImp::LinuxRasImp(OsSysman *pOsSysman) {
-    LinuxSysmanImp *pLinuxSysmanImp = static_cast<LinuxSysmanImp *>(pOsSysman);
+ze_result_t LinuxRasImp::osRasGetConfig(zes_ras_config_t *config) {
+    config->totalThreshold = totalThreshold;
+    memcpy(config->detailedThresholds.category, categoryThreshold, sizeof(config->detailedThresholds.category));
+    return ZE_RESULT_SUCCESS;
+}
+
+ze_result_t LinuxRasImp::osRasSetConfig(const zes_ras_config_t *config) {
+    if (pFsAccess->isRootUser() == true) {
+        totalThreshold = config->totalThreshold;
+        memcpy(categoryThreshold, config->detailedThresholds.category, sizeof(config->detailedThresholds.category));
+        return ZE_RESULT_SUCCESS;
+    }
+    return ZE_RESULT_ERROR_INSUFFICIENT_PERMISSIONS;
+}
+
+ze_result_t LinuxRasImp::osRasGetProperties(zes_ras_properties_t &properties) {
+    properties.pNext = nullptr;
+    properties.type = osRasErrorType;
+    properties.onSubdevice = isSubdevice;
+    properties.subdeviceId = subdeviceId;
+    return ZE_RESULT_SUCCESS;
+}
+LinuxRasImp::LinuxRasImp(OsSysman *pOsSysman, zes_ras_error_type_t type, ze_bool_t onSubdevice, uint32_t subdeviceId) : osRasErrorType(type), isSubdevice(onSubdevice), subdeviceId(subdeviceId) {
+    pLinuxSysmanImp = static_cast<LinuxSysmanImp *>(pOsSysman);
     pFsAccess = &pLinuxSysmanImp->getFsAccess();
-    osRasErrorType = ZET_RAS_ERROR_TYPE_UNCORRECTABLE;
 }
 
-OsRas *OsRas::create(OsSysman *pOsSysman) {
-    LinuxRasImp *pLinuxRasImp = new LinuxRasImp(pOsSysman);
+OsRas *OsRas::create(OsSysman *pOsSysman, zes_ras_error_type_t type, ze_bool_t onSubdevice, uint32_t subdeviceId) {
+    LinuxRasImp *pLinuxRasImp = new LinuxRasImp(pOsSysman, type, onSubdevice, subdeviceId);
     return static_cast<OsRas *>(pLinuxRasImp);
 }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -7,8 +7,7 @@
 
 #include "shared/source/helpers/file_io.h"
 #include "shared/source/utilities/debug_file_reader.h"
-
-#include "test.h"
+#include "shared/test/common/test_macros/test.h"
 
 #include "gtest/gtest.h"
 
@@ -43,7 +42,7 @@ class TestSettingsFileReader : public SettingsFileReader {
 const char *TestSettingsFileReader::testPath = "./test_files/igdrcl.config";
 const char *TestSettingsFileReader::stringTestPath = "./test_files/igdrcl_string.config";
 
-TEST(SettingsFileReader, CreateFileReaderWithoutFile) {
+TEST(SettingsFileReader, GivenFilesDoesNotExistWhenCreatingFileReaderThenCreationSucceeds) {
     bool settingsFileExists = fileExists(SettingsReader::settingsFileName);
 
     // if settings file exists, remove it
@@ -58,7 +57,7 @@ TEST(SettingsFileReader, CreateFileReaderWithoutFile) {
     EXPECT_EQ(0u, reader->getStringSettingsCount());
 }
 
-TEST(SettingsFileReader, GetStringSettingFromFile) {
+TEST(SettingsFileReader, WhenGettingSettingThenCorrectStringValueIsReturned) {
     // Use test settings file
     auto reader = std::make_unique<TestSettingsFileReader>(TestSettingsFileReader::stringTestPath);
     ASSERT_NE(nullptr, reader);
@@ -78,7 +77,7 @@ TEST(SettingsFileReader, GetStringSettingFromFile) {
             EXPECT_TRUE(true);                                                    \
         }                                                                         \
     }
-#include "opencl/test/unit_test/helpers/test_debug_variables.inl"
+#include "shared/test/unit_test/helpers/test_debug_variables.inl"
 #undef DECLARE_DEBUG_VARIABLE
 }
 
@@ -89,7 +88,11 @@ TEST(SettingsFileReader, givenDebugFileSettingInWhichStringIsFollowedByIntegerWh
     int32_t retValue = 0;
     int32_t returnedIntValue = reader->getSetting("IntTestKey", retValue);
 
-    EXPECT_EQ(1, returnedIntValue);
+    EXPECT_EQ(123, returnedIntValue);
+
+    int32_t returnedIntValueHex = reader->getSetting("IntTestKeyHex", 0);
+
+    EXPECT_EQ(0xABCD, returnedIntValueHex);
 
     std::string retValueString;
     std::string returnedStringValue = reader->getSetting("StringTestKey", retValueString);
@@ -97,7 +100,7 @@ TEST(SettingsFileReader, givenDebugFileSettingInWhichStringIsFollowedByIntegerWh
     EXPECT_STREQ(returnedStringValue.c_str(), "TestValue");
 }
 
-TEST(SettingsFileReader, GetSettingWhenNotInFile) {
+TEST(SettingsFileReader, GivenSettingNotInFileWhenGettingSettingThenProvidedDefaultIsReturned) {
 
     // Use test settings file
     auto reader = std::make_unique<TestSettingsFileReader>(TestSettingsFileReader::testPath);
@@ -119,7 +122,7 @@ TEST(SettingsFileReader, GetSettingWhenNotInFile) {
     EXPECT_EQ(defaultStringValue, returnedStringValue);
 }
 
-TEST(SettingsFileReader, appSpecificLocation) {
+TEST(SettingsFileReader, WhenGettingAppSpecificLocationThenCorrectLocationIsReturned) {
     std::unique_ptr<TestSettingsFileReader> reader(new TestSettingsFileReader(TestSettingsFileReader::testPath));
     std::string appSpecific = "cl_cache_dir";
     EXPECT_EQ(appSpecific, reader->appSpecificLocation(appSpecific));

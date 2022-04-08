@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -7,13 +7,16 @@
 
 #include "mock_os_layer.h"
 
+#include "shared/source/helpers/string.h"
+
 #include <cassert>
 #include <dirent.h>
 #include <iostream>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
 
 int (*c_open)(const char *pathname, int flags, ...) = nullptr;
 int (*openFull)(const char *pathname, int flags, ...) = nullptr;
-int (*c_ioctl)(int fd, unsigned long int request, ...) = nullptr;
 
 int fakeFd = 1023;
 int haveDri = 0;                                       // index of dri to serve, -1 - none
@@ -36,10 +39,38 @@ int failOnVirtualMemoryCreate = 0;
 int failOnSetPriority = 0;
 int failOnPreemption = 0;
 int failOnDrmVersion = 0;
+int accessCalledTimes = 0;
+int readLinkCalledTimes = 0;
+int fstatCalledTimes = 0;
 char providedDrmVersion[5] = {'i', '9', '1', '5', '\0'};
 uint64_t gpuTimestamp = 0;
 int ioctlSeq[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 size_t ioctlCnt = 0;
+
+int fstat(int fd, struct stat *buf) {
+    ++fstatCalledTimes;
+    buf->st_rdev = 0x0;
+    return 0;
+}
+
+int access(const char *pathname, int mode) {
+    ++accessCalledTimes;
+    return 0;
+}
+
+ssize_t readlink(const char *path, char *buf, size_t bufsiz) {
+    ++readLinkCalledTimes;
+
+    if (readLinkCalledTimes % 2 == 1) {
+        return -1;
+    }
+
+    constexpr size_t sizeofPath = sizeof("../../devices/pci0000:4a/0000:4a:02.0/0000:4b:00.0/0000:4c:01.0/0000:00:03.0/drm/renderD128");
+
+    strcpy_s(buf, sizeofPath, "../../devices/pci0000:4a/0000:4a:02.0/0000:4b:00.0/0000:4c:01.0/0000:00:03.0/drm/renderD128");
+
+    return sizeofPath;
+}
 
 int open(const char *pathname, int flags, ...) {
     if (openFull != nullptr) {
@@ -70,16 +101,26 @@ DIR *opendir(const char *name) {
 int closedir(DIR *dirp) {
     return 0u;
 }
-uint32_t entryIndex = 0u;
-const uint32_t numEntries = 4u;
 
 struct dirent entries[] = {
     {0, 0, 0, 0, "."},
+    {0, 0, 0, 0, "pci-0000:00:03.1-render"},
+    {0, 0, 0, 0, "platform-4010000000.pcie-pci-0000:00:02.0-render"},
     {0, 0, 0, 0, "pci-0000:test1-render"},
     {0, 0, 0, 0, "pci-0000:test2-render"},
     {0, 0, 0, 0, "pci-0000:1234-render"},
-
+    {0, 0, 0, 0, "pci-0000:3:0.0-render"},
+    {0, 0, 0, 0, "pci-0a00:00:03.1-render"},
+    {0, 0, 0, 0, "pci-0000:b3:03.1-render"},
+    {0, 0, 0, 0, "pci-0000:00:b3.1-render"},
+    {0, 0, 0, 0, "pci-0000:00:03.a-render"},
+    {0, 0, 0, 0, "pci-0000:00:03.a-render-12"},
+    {0, 0, 0, 0, "pcii0000:00:03.a-render"},
+    {0, 0, 0, 0, "pcii-render"},
 };
+
+uint32_t entryIndex = 0u;
+const uint32_t numEntries = sizeof(entries) / sizeof(entries[0]);
 
 struct dirent *readdir(DIR *dir) {
     if (entryIndex >= numEntries) {
@@ -122,7 +163,6 @@ int drmGetParam(drm_i915_getparam_t *param) {
 #endif
     default:
         ret = -1;
-        std::cerr << "drm.getParam: " << std::dec << param->param << std::endl;
         break;
     }
     return ret;
@@ -135,6 +175,8 @@ int drmSetContextParam(drm_i915_gem_context_param *param) {
     switch (param->param) {
     case I915_CONTEXT_PRIVATE_PARAM_BOOST:
         ret = failOnParamBoost;
+        break;
+    case I915_CONTEXT_PARAM_VM:
         break;
 #if defined(I915_PARAM_HAS_SCHEDULER)
     case I915_CONTEXT_PARAM_PRIORITY:
@@ -150,7 +192,6 @@ int drmSetContextParam(drm_i915_gem_context_param *param) {
         break;
     default:
         ret = -1;
-        std::cerr << "drm.setContextParam: " << std::dec << param->param << std::endl;
         break;
     }
     return ret;
@@ -168,13 +209,12 @@ int drmGetContextParam(drm_i915_gem_context_param *param) {
         break;
     default:
         ret = -1;
-        std::cerr << "drm.getContextParam: " << std::dec << param->param << std::endl;
         break;
     }
     return ret;
 }
 
-int drmContextCreate(drm_i915_gem_context_create *create) {
+int drmContextCreate(drm_i915_gem_context_create_ext *create) {
     assert(create);
 
     create->ctx_id = 1;
@@ -192,7 +232,6 @@ int drmContextDestroy(drm_i915_gem_context_destroy *destroy) {
 
 int drmVirtualMemoryCreate(drm_i915_gem_vm_control *control) {
     assert(control);
-
     control->vm_id = ++vmId;
     return failOnVirtualMemoryCreate;
 }
@@ -231,8 +270,6 @@ int drmQueryItem(drm_i915_query *query) {
 }
 
 int ioctl(int fd, unsigned long int request, ...) throw() {
-    if (c_ioctl == nullptr)
-        c_ioctl = (int (*)(int, unsigned long int, ...))dlsym(RTLD_NEXT, "ioctl");
     int res;
     va_list vl;
     va_start(vl, request);
@@ -251,8 +288,8 @@ int ioctl(int fd, unsigned long int request, ...) throw() {
             case DRM_IOCTL_I915_GEM_CONTEXT_GETPARAM:
                 res = drmGetContextParam(va_arg(vl, drm_i915_gem_context_param *));
                 break;
-            case DRM_IOCTL_I915_GEM_CONTEXT_CREATE:
-                res = drmContextCreate(va_arg(vl, drm_i915_gem_context_create *));
+            case DRM_IOCTL_I915_GEM_CONTEXT_CREATE_EXT:
+                res = drmContextCreate(va_arg(vl, drm_i915_gem_context_create_ext *));
                 break;
             case DRM_IOCTL_I915_GEM_CONTEXT_DESTROY:
                 res = drmContextDestroy(va_arg(vl, drm_i915_gem_context_destroy *));
@@ -278,7 +315,6 @@ int ioctl(int fd, unsigned long int request, ...) throw() {
         return res;
     }
 
-    res = c_ioctl(fd, request, vl);
     va_end(vl);
-    return res;
+    return -1;
 }

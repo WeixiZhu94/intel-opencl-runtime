@@ -1,3 +1,11 @@
+<!---
+
+Copyright (C) 2019-2021 Intel Corporation
+
+SPDX-License-Identifier: MIT
+
+-->
+
 # NEO in Linux distributions
 
 ## Level Zero specific
@@ -7,6 +15,13 @@
 ## OpenCL specific
 
 * [distributions](https://github.com/intel/compute-runtime/blob/master/opencl/doc/DISTRIBUTIONS.md)
+
+## Intel software for General Purpose GPU capabilities
+
+* Documentation and instructions for installing, deploying, and updating Intel software to enable general purpose GPU (GPGPU) capabilities for Linux*-based operating system distributions can be found on:
+    [https://dgpu-docs.intel.com](https://dgpu-docs.intel.com)
+
+* An Intel brand integrated and global search accessible Linux graphics landing page [https://intel.com/linux-graphics-drivers](https://intel.com/linux-graphics-drivers)
 
 ## Packages mirror
 
@@ -18,9 +33,9 @@ Starting with [release 19.43.14583](https://github.com/intel/compute-runtime/rel
 
 Docker images are provided in [intel-opencl](https://hub.docker.com/r/intelopencl/intel-opencl) repository.
 
-Example for Fedora* 31
+Example for Fedora* 33
 
 ```
-docker run -it --device /dev/dri:/dev/dri --rm docker.io/intelopencl/intel-opencl:fedora-31-copr clinfo
+docker run -it --device /dev/dri:/dev/dri --rm docker.io/intelopencl/intel-opencl:fedora-33-copr clinfo
 ```
 

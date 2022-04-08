@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -40,28 +40,25 @@ cl_int CommandQueueHw<GfxFamily>::enqueueReadImage(
     cl_uint numEventsInWaitList,
     const cl_event *eventWaitList,
     cl_event *event) {
+    constexpr cl_command_type cmdType = CL_COMMAND_READ_IMAGE;
 
-    auto &csr = getGpgpuCommandStreamReceiver();
+    CsrSelectionArgs csrSelectionArgs{cmdType, srcImage, {}, device->getRootDeviceIndex(), region, origin, nullptr};
+    CommandStreamReceiver &csr = selectCsrForBuiltinOperation(csrSelectionArgs);
+
     if (nullptr == mapAllocation) {
-        notifyEnqueueReadImage(srcImage, !!blockingRead, EngineHelpers::isBcs(csr.getOsContext().getEngineType()));
+        notifyEnqueueReadImage(srcImage, static_cast<bool>(blockingRead), EngineHelpers::isBcs(csr.getOsContext().getEngineType()));
     }
 
-    MultiDispatchInfo di;
     auto isMemTransferNeeded = true;
     if (srcImage->isMemObjZeroCopy()) {
         size_t hostOffset;
         Image::calculateHostPtrOffset(&hostOffset, origin, region, inputRowPitch, inputSlicePitch, srcImage->getImageDesc().image_type, srcImage->getSurfaceFormatInfo().surfaceFormat.ImageElementSizeInBytes);
-        isMemTransferNeeded = srcImage->checkIfMemoryTransferIsRequired(hostOffset, 0, ptr, CL_COMMAND_READ_IMAGE);
+        isMemTransferNeeded = srcImage->checkIfMemoryTransferIsRequired(hostOffset, 0, ptr, cmdType);
     }
     if (!isMemTransferNeeded) {
-        return enqueueMarkerForReadWriteOperation(srcImage, ptr, CL_COMMAND_READ_IMAGE, blockingRead,
+        return enqueueMarkerForReadWriteOperation(srcImage, ptr, cmdType, blockingRead,
                                                   numEventsInWaitList, eventWaitList, event);
     }
-
-    auto &builder = BuiltInDispatchBuilderOp::getBuiltinDispatchInfoBuilder(EBuiltInOps::CopyImage3dToBuffer,
-                                                                            this->getDevice());
-
-    BuiltInOwnershipWrapper builtInLock(builder, this->context);
 
     size_t hostPtrSize = calculateHostPtrSizeForImage(region, inputRowPitch, inputSlicePitch, srcImage);
     void *dstPtr = ptr;
@@ -71,6 +68,7 @@ cl_int CommandQueueHw<GfxFamily>::enqueueReadImage(
     GeneralSurface mapSurface;
     Surface *surfaces[] = {&srcImgSurf, nullptr};
 
+    bool tempAllocFallback = false;
     if (mapAllocation) {
         surfaces[1] = &mapSurface;
         mapSurface.setGraphicsAllocation(mapAllocation);
@@ -84,7 +82,16 @@ cl_int CommandQueueHw<GfxFamily>::enqueueReadImage(
             region[2] != 0) {
             bool status = csr.createAllocationForHostSurface(hostPtrSurf, true);
             if (!status) {
-                return CL_OUT_OF_RESOURCES;
+                if (CL_TRUE == blockingRead) {
+                    hostPtrSurf.setIsPtrCopyAllowed(true);
+                    status = csr.createAllocationForHostSurface(hostPtrSurf, true);
+                    if (!status) {
+                        return CL_OUT_OF_RESOURCES;
+                    }
+                    tempAllocFallback = true;
+                } else {
+                    return CL_OUT_OF_RESOURCES;
+                }
             }
             dstPtr = reinterpret_cast<void *>(hostPtrSurf.getAllocation()->getGpuAddress());
         }
@@ -99,20 +106,20 @@ cl_int CommandQueueHw<GfxFamily>::enqueueReadImage(
     dc.dstOffset.x = dstPtrOffset;
     dc.srcOffset = origin;
     dc.size = region;
-    dc.srcRowPitch = (srcImage->getImageDesc().image_type == CL_MEM_OBJECT_IMAGE1D_ARRAY) ? inputSlicePitch : inputRowPitch;
-    dc.srcSlicePitch = inputSlicePitch;
-    if (srcImage->getImageDesc().num_mip_levels > 0) {
+    dc.dstRowPitch = (srcImage->getImageDesc().image_type == CL_MEM_OBJECT_IMAGE1D_ARRAY) ? inputSlicePitch : inputRowPitch;
+    dc.dstSlicePitch = inputSlicePitch;
+    if (isMipMapped(srcImage->getImageDesc())) {
         dc.srcMipLevel = findMipLevel(srcImage->getImageDesc().image_type, origin);
     }
-    builder.buildDispatchInfos(di, dc);
+    dc.transferAllocation = mapAllocation ? mapAllocation : hostPtrSurf.getAllocation();
+    if (tempAllocFallback) {
+        dc.userPtrForPostOperationCpuCopy = ptr;
+    }
 
-    enqueueHandler<CL_COMMAND_READ_IMAGE>(
-        surfaces,
-        blockingRead == CL_TRUE,
-        di,
-        numEventsInWaitList,
-        eventWaitList,
-        event);
+    auto eBuiltInOps = EBuiltInOps::CopyImage3dToBuffer;
+    MultiDispatchInfo dispatchInfo(dc);
+
+    dispatchBcsOrGpgpuEnqueue<CL_COMMAND_READ_IMAGE>(dispatchInfo, surfaces, eBuiltInOps, numEventsInWaitList, eventWaitList, event, blockingRead == CL_TRUE, csr);
 
     if (context->isProvidingPerformanceHints()) {
         if (!isL3Capable(ptr, hostPtrSize)) {

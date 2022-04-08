@@ -5,9 +5,7 @@
  *
  */
 
-#include "mock_cmdlist.h"
-
-#include "level_zero/core/test/unit_tests/mocks/mock_device.h"
+#include "level_zero/core/test/unit_tests/mocks/mock_cmdlist.h"
 
 namespace L0 {
 namespace ult {
@@ -16,7 +14,7 @@ WhiteBox<::L0::CommandList>::WhiteBox(Device *device) : BaseClass(BaseClass::def
 
 WhiteBox<::L0::CommandList>::~WhiteBox() {}
 
-Mock<CommandList>::Mock(Device *device) : WhiteBox<::L0::CommandList>(device) {
+MockCommandList::MockCommandList(Device *device) : WhiteBox<::L0::CommandList>(device) {
     this->device = device;
     size_t batchBufferSize = 65536u;
     batchBuffer = new uint8_t[batchBufferSize];
@@ -25,7 +23,7 @@ Mock<CommandList>::Mock(Device *device) : WhiteBox<::L0::CommandList>(device) {
                                                  MemoryPool::System4KBPages);
 }
 
-Mock<CommandList>::~Mock() {
+MockCommandList::~MockCommandList() {
     delete mockAllocation;
     delete[] batchBuffer;
 }

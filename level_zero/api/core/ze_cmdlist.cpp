@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019-2020 Intel Corporation
+ * Copyright (C) 2020-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -9,20 +9,8 @@
 #include "level_zero/core/source/context/context.h"
 #include <level_zero/ze_api.h>
 
-#include "third_party/level_zero/ze_api_ext.h"
-
-extern "C" {
-
-__zedllexport ze_result_t __zecall
-zeCommandListCreate(
-    ze_device_handle_t hDevice,
-    const ze_command_list_desc_t *desc,
-    ze_command_list_handle_t *phCommandList) {
-    return L0::Device::fromHandle(hDevice)->createCommandList(desc, phCommandList);
-}
-
 ZE_APIEXPORT ze_result_t ZE_APICALL
-zeCommandListCreateExt(
+zeCommandListCreate(
     ze_context_handle_t hContext,
     ze_device_handle_t hDevice,
     const ze_command_list_desc_t *desc,
@@ -30,16 +18,8 @@ zeCommandListCreateExt(
     return L0::Context::fromHandle(hContext)->createCommandList(hDevice, desc, phCommandList);
 }
 
-__zedllexport ze_result_t __zecall
-zeCommandListCreateImmediate(
-    ze_device_handle_t hDevice,
-    const ze_command_queue_desc_t *altdesc,
-    ze_command_list_handle_t *phCommandList) {
-    return L0::Device::fromHandle(hDevice)->createCommandListImmediate(altdesc, phCommandList);
-}
-
 ZE_APIEXPORT ze_result_t ZE_APICALL
-zeCommandListCreateImmediateExt(
+zeCommandListCreateImmediate(
     ze_context_handle_t hContext,
     ze_device_handle_t hDevice,
     const ze_command_queue_desc_t *altdesc,
@@ -47,26 +27,26 @@ zeCommandListCreateImmediateExt(
     return L0::Context::fromHandle(hContext)->createCommandListImmediate(hDevice, altdesc, phCommandList);
 }
 
-__zedllexport ze_result_t __zecall
+ZE_APIEXPORT ze_result_t ZE_APICALL
 zeCommandListDestroy(
     ze_command_list_handle_t hCommandList) {
     return L0::CommandList::fromHandle(hCommandList)->destroy();
 }
 
-__zedllexport ze_result_t __zecall
+ZE_APIEXPORT ze_result_t ZE_APICALL
 zeCommandListClose(
     ze_command_list_handle_t hCommandList) {
     return L0::CommandList::fromHandle(hCommandList)->close();
 }
 
-__zedllexport ze_result_t __zecall
+ZE_APIEXPORT ze_result_t ZE_APICALL
 zeCommandListReset(
     ze_command_list_handle_t hCommandList) {
     return L0::CommandList::fromHandle(hCommandList)->reset();
 }
 
 ZE_APIEXPORT ze_result_t ZE_APICALL
-zeCommandListAppendWriteGlobalTimestampExt(
+zeCommandListAppendWriteGlobalTimestamp(
     ze_command_list_handle_t hCommandList,
     uint64_t *dstptr,
     ze_event_handle_t hSignalEvent,
@@ -75,4 +55,15 @@ zeCommandListAppendWriteGlobalTimestampExt(
     return L0::CommandList::fromHandle(hCommandList)->appendWriteGlobalTimestamp(dstptr, hSignalEvent, numWaitEvents, phWaitEvents);
 }
 
-} // extern "C"
+ZE_APIEXPORT ze_result_t ZE_APICALL
+zeCommandListAppendQueryKernelTimestamps(
+    ze_command_list_handle_t hCommandList,
+    uint32_t numEvents,
+    ze_event_handle_t *phEvents,
+    void *dstptr,
+    const size_t *pOffsets,
+    ze_event_handle_t hSignalEvent,
+    uint32_t numWaitEvents,
+    ze_event_handle_t *phWaitEvents) {
+    return L0::CommandList::fromHandle(hCommandList)->appendQueryKernelTimestamps(numEvents, phEvents, dstptr, pOffsets, hSignalEvent, numWaitEvents, phWaitEvents);
+}

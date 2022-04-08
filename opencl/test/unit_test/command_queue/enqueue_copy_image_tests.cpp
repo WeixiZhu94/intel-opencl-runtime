@@ -1,18 +1,23 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2022 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
  */
 
+#include "shared/test/common/helpers/debug_manager_state_restore.h"
+#include "shared/test/common/helpers/unit_test_helper.h"
+#include "shared/test/common/libult/ult_command_stream_receiver.h"
+#include "shared/test/common/mocks/mock_builtins.h"
+#include "shared/test/common/mocks/mock_gmm_resource_info.h"
+#include "shared/test/common/test_macros/test.h"
+
 #include "opencl/source/built_ins/builtins_dispatch_builder.h"
 #include "opencl/test/unit_test/command_queue/enqueue_copy_image_fixture.h"
+#include "opencl/test/unit_test/fixtures/one_mip_level_image_fixture.h"
 #include "opencl/test/unit_test/gen_common/gen_commands_common_validation.h"
-#include "opencl/test/unit_test/helpers/unit_test_helper.h"
-#include "opencl/test/unit_test/libult/ult_command_stream_receiver.h"
 #include "opencl/test/unit_test/mocks/mock_builtin_dispatch_info_builder.h"
-#include "opencl/test/unit_test/mocks/mock_builtins.h"
-#include "test.h"
+#include "opencl/test/unit_test/mocks/mock_command_queue.h"
 
 #include "reg_configs_common.h"
 
@@ -39,7 +44,8 @@ HWCMDTEST_F(IGFX_GEN8_CORE, EnqueueCopyImageTest, WhenCopyingImageThenGpgpuWalke
 
     // Compute the SIMD lane mask
     size_t simd =
-        cmd->getSimdSize() == GPGPU_WALKER::SIMD_SIZE_SIMD32 ? 32 : cmd->getSimdSize() == GPGPU_WALKER::SIMD_SIZE_SIMD16 ? 16 : 8;
+        cmd->getSimdSize() == GPGPU_WALKER::SIMD_SIZE_SIMD32 ? 32 : cmd->getSimdSize() == GPGPU_WALKER::SIMD_SIZE_SIMD16 ? 16
+                                                                                                                         : 8;
     uint64_t simdMask = maxNBitValue(simd);
 
     // Mask off lanes based on the execution masks
@@ -85,7 +91,7 @@ HWTEST_F(EnqueueCopyImageTest, WhenCopyingImageThenIndirectDataGetsAdded) {
     auto sshBefore = pSSH->getUsed();
 
     EnqueueCopyImageHelper<>::enqueueCopyImage(pCmdQ, srcImage, dstImage);
-    EXPECT_TRUE(UnitTestHelper<FamilyType>::evaluateDshUsage(dshBefore, pDSH->getUsed(), nullptr));
+    EXPECT_TRUE(UnitTestHelper<FamilyType>::evaluateDshUsage(dshBefore, pDSH->getUsed(), nullptr, rootDeviceIndex));
     EXPECT_NE(iohBefore, pIOH->getUsed());
     EXPECT_NE(sshBefore, pSSH->getUsed());
 }
@@ -98,7 +104,11 @@ HWTEST_F(EnqueueCopyImageTest, WhenCopyingImageThenL3ProgrammingIsCorrect) {
 HWCMDTEST_F(IGFX_GEN8_CORE, EnqueueCopyImageTest, WhenEnqueueIsDoneThenStateBaseAddressIsProperlyProgrammed) {
     enqueueCopyImage<FamilyType>();
     auto &ultCsr = this->pDevice->getUltCommandStreamReceiver<FamilyType>();
+
+    auto &hwHelper = HwHelper::get(pDevice->getHardwareInfo().platform.eRenderCoreFamily);
+
     validateStateBaseAddress<FamilyType>(ultCsr.getMemoryManager()->getInternalHeapBaseAddress(ultCsr.rootDeviceIndex, pIOH->getGraphicsAllocation()->isAllocatedInLocalMemoryPool()),
+                                         ultCsr.getMemoryManager()->getInternalHeapBaseAddress(ultCsr.rootDeviceIndex, !hwHelper.useSystemMemoryPlacementForISA(pDevice->getHardwareInfo())),
                                          pDSH, pIOH, pSSH, itorPipelineSelect, itorWalker, cmdList, 0llu);
 }
 
@@ -158,10 +168,16 @@ HWCMDTEST_F(IGFX_GEN8_CORE, EnqueueCopyImageTest, WhenCopyingImageThenInterfaceD
 HWTEST_F(EnqueueCopyImageTest, WhenCopyingImageThenSurfaceStateIsCorrect) {
     typedef typename FamilyType::RENDER_SURFACE_STATE RENDER_SURFACE_STATE;
 
+    auto mockCmdQ = std::make_unique<MockCommandQueueHw<FamilyType>>(context, pClDevice, nullptr);
+    VariableBackup<CommandQueue *> cmdQBackup(&pCmdQ, mockCmdQ.get());
+    mockCmdQ->storeMultiDispatchInfo = true;
+
     enqueueCopyImage<FamilyType>();
 
+    const auto &kernelInfo = mockCmdQ->storedMultiDispatchInfo.begin()->getKernel()->getKernelInfo();
     for (uint32_t i = 0; i < 2; ++i) {
-        const auto &surfaceState = getSurfaceState<FamilyType>(&pCmdQ->getIndirectHeap(IndirectHeap::SURFACE_STATE, 0), i);
+        uint32_t index = static_cast<uint32_t>(kernelInfo.getArgDescriptorAt(i).template as<ArgDescImage>().bindful) / sizeof(RENDER_SURFACE_STATE);
+        const auto &surfaceState = getSurfaceState<FamilyType>(&pCmdQ->getIndirectHeap(IndirectHeap::Type::SURFACE_STATE, 0), index);
         const auto &imageDesc = dstImage->getImageDesc();
         EXPECT_EQ(imageDesc.image_width, surfaceState.getWidth());
         EXPECT_EQ(imageDesc.image_height, surfaceState.getHeight());
@@ -175,14 +191,16 @@ HWTEST_F(EnqueueCopyImageTest, WhenCopyingImageThenSurfaceStateIsCorrect) {
             surfaceFormat == RENDER_SURFACE_STATE::SURFACE_FORMAT_R16_UINT ||
             surfaceFormat == RENDER_SURFACE_STATE::SURFACE_FORMAT_R8_UINT;
         EXPECT_TRUE(isRedescribedFormat);
-        EXPECT_EQ(RENDER_SURFACE_STATE::SURFACE_HORIZONTAL_ALIGNMENT_HALIGN_4, surfaceState.getSurfaceHorizontalAlignment());
+        EXPECT_EQ(MockGmmResourceInfo::getHAlignSurfaceStateResult, surfaceState.getSurfaceHorizontalAlignment());
         EXPECT_EQ(RENDER_SURFACE_STATE::SURFACE_VERTICAL_ALIGNMENT_VALIGN_4, surfaceState.getSurfaceVerticalAlignment());
     }
 
-    const auto &srcSurfaceState = getSurfaceState<FamilyType>(&pCmdQ->getIndirectHeap(IndirectHeap::SURFACE_STATE, 0), 0);
+    uint32_t srcIndex = static_cast<uint32_t>(kernelInfo.getArgDescriptorAt(0).template as<ArgDescImage>().bindful) / sizeof(RENDER_SURFACE_STATE);
+    const auto &srcSurfaceState = getSurfaceState<FamilyType>(&pCmdQ->getIndirectHeap(IndirectHeap::Type::SURFACE_STATE, 0), srcIndex);
     EXPECT_EQ(srcImage->getGraphicsAllocation(pClDevice->getRootDeviceIndex())->getGpuAddress(), srcSurfaceState.getSurfaceBaseAddress());
 
-    const auto &dstSurfaceState = getSurfaceState<FamilyType>(&pCmdQ->getIndirectHeap(IndirectHeap::SURFACE_STATE, 0), 1);
+    uint32_t dstIndex = static_cast<uint32_t>(kernelInfo.getArgDescriptorAt(1).template as<ArgDescImage>().bindful) / sizeof(RENDER_SURFACE_STATE);
+    const auto &dstSurfaceState = getSurfaceState<FamilyType>(&pCmdQ->getIndirectHeap(IndirectHeap::Type::SURFACE_STATE, 0), dstIndex);
     EXPECT_EQ(dstImage->getGraphicsAllocation(pClDevice->getRootDeviceIndex())->getGpuAddress(), dstSurfaceState.getSurfaceBaseAddress());
 }
 
@@ -206,13 +224,12 @@ HWTEST_P(MipMapCopyImageTest, GivenImagesWithNonZeroMipLevelsWhenCopyImageIsCall
     pCmdQ->getDevice().getExecutionEnvironment()->rootDeviceEnvironments[pCmdQ->getDevice().getRootDeviceIndex()]->builtins.reset(builtIns);
     auto &origBuilder = BuiltInDispatchBuilderOp::getBuiltinDispatchInfoBuilder(
         EBuiltInOps::CopyImageToImage3d,
-        pCmdQ->getDevice());
+        pCmdQ->getClDevice());
     // substitute original builder with mock builder
-    auto oldBuilder = builtIns->setBuiltinDispatchInfoBuilder(
+    auto oldBuilder = pClExecutionEnvironment->setBuiltinDispatchInfoBuilder(
+        rootDeviceIndex,
         EBuiltInOps::CopyImageToImage3d,
-        pCmdQ->getContext(),
-        pCmdQ->getDevice(),
-        std::unique_ptr<NEO::BuiltinDispatchInfoBuilder>(new MockBuiltinDispatchInfoBuilder(*builtIns, &origBuilder)));
+        std::unique_ptr<NEO::BuiltinDispatchInfoBuilder>(new MockBuiltinDispatchInfoBuilder(*builtIns, pCmdQ->getClDevice(), &origBuilder)));
 
     cl_int retVal = CL_SUCCESS;
     cl_image_desc srcImageDesc = {};
@@ -299,17 +316,16 @@ HWTEST_P(MipMapCopyImageTest, GivenImagesWithNonZeroMipLevelsWhenCopyImageIsCall
     EXPECT_EQ(CL_SUCCESS, retVal);
 
     auto &mockBuilder = static_cast<MockBuiltinDispatchInfoBuilder &>(BuiltInDispatchBuilderOp::getBuiltinDispatchInfoBuilder(EBuiltInOps::CopyImageToImage3d,
-                                                                                                                              pCmdQ->getDevice()));
+                                                                                                                              pCmdQ->getClDevice()));
     auto params = mockBuilder.getBuiltinOpParams();
 
     EXPECT_EQ(expectedSrcMipLevel, params->srcMipLevel);
     EXPECT_EQ(expectedDstMipLevel, params->dstMipLevel);
 
     // restore original builder and retrieve mock builder
-    auto newBuilder = builtIns->setBuiltinDispatchInfoBuilder(
+    auto newBuilder = pClExecutionEnvironment->setBuiltinDispatchInfoBuilder(
+        rootDeviceIndex,
         EBuiltInOps::CopyImageToImage3d,
-        pCmdQ->getContext(),
-        pCmdQ->getDevice(),
         std::move(oldBuilder));
     EXPECT_NE(nullptr, newBuilder);
 }
@@ -321,3 +337,24 @@ INSTANTIATE_TEST_CASE_P(MipMapCopyImageTest_GivenImagesWithNonZeroMipLevelsWhenC
                         ::testing::Combine(
                             ::testing::ValuesIn(types),
                             ::testing::ValuesIn(types)));
+
+using OneMipLevelCopyImageImageTests = Test<OneMipLevelImageFixture>;
+
+HWTEST_F(OneMipLevelCopyImageImageTests, GivenNotMippedImageWhenCopyingImageThenDoNotProgramSourceAndDestinationMipLevels) {
+    auto dstImage = std::unique_ptr<Image>(createImage());
+    auto queue = createQueue<FamilyType>();
+    auto retVal = queue->enqueueCopyImage(
+        image.get(),
+        dstImage.get(),
+        origin,
+        origin,
+        region,
+        0,
+        nullptr,
+        nullptr);
+
+    EXPECT_EQ(CL_SUCCESS, retVal);
+    EXPECT_TRUE(builtinOpsParamsCaptured);
+    EXPECT_EQ(0u, usedBuiltinOpsParams.srcMipLevel);
+    EXPECT_EQ(0u, usedBuiltinOpsParams.dstMipLevel);
+}

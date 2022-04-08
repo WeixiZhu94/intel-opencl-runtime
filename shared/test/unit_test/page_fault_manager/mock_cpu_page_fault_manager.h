@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019-2020 Intel Corporation
+ * Copyright (C) 2019-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -13,9 +13,13 @@ using namespace NEO;
 
 class MockPageFaultManager : public PageFaultManager {
   public:
+    using PageFaultManager::gpuDomainHandler;
+    using PageFaultManager::handleGpuDomainTransferForAubAndTbx;
+    using PageFaultManager::handleGpuDomainTransferForHw;
     using PageFaultManager::memoryData;
     using PageFaultManager::PageFaultData;
     using PageFaultManager::PageFaultManager;
+    using PageFaultManager::selectGpuDomainHandler;
     using PageFaultManager::verifyPageFault;
 
     void allowCPUMemoryAccess(void *ptr, size_t size) override {
@@ -49,7 +53,15 @@ class MockPageFaultManager : public PageFaultManager {
     void baseGpuTransfer(void *ptr, void *cmdQ) {
         PageFaultManager::transferToGpu(ptr, cmdQ);
     }
-    void broadcastWaitSignal() override {}
+    void evictMemoryAfterImplCopy(GraphicsAllocation *allocation, Device *device) override {}
+
+    void *getHwHandlerAddress() {
+        return reinterpret_cast<void *>(PageFaultManager::handleGpuDomainTransferForHw);
+    }
+
+    void *getAubAndTbxHandlerAddress() {
+        return reinterpret_cast<void *>(PageFaultManager::handleGpuDomainTransferForAubAndTbx);
+    }
 
     int allowMemoryAccessCalled = 0;
     int protectMemoryCalled = 0;
@@ -69,6 +81,7 @@ template <class T>
 class MockPageFaultManagerHandlerInvoke : public T {
   public:
     using T::allowCPUMemoryAccess;
+    using T::evictMemoryAfterImplCopy;
     using T::protectCPUMemoryAccess;
     using T::T;
 

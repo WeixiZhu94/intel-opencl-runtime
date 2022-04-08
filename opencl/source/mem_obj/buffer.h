@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -19,10 +19,11 @@
 #include <functional>
 
 namespace NEO {
-class Device;
 class Buffer;
 class ClDevice;
+class Device;
 class MemoryManager;
+struct EncodeSurfaceStateArgs;
 
 using BufferCreatFunc = Buffer *(*)(Context *context,
                                     MemoryProperties memoryProperties,
@@ -120,35 +121,39 @@ class Buffer : public MemObj {
 
     static void setSurfaceState(const Device *device,
                                 void *surfaceState,
+                                bool forceNonAuxMode,
+                                bool disableL3,
                                 size_t svmSize,
                                 void *svmPtr,
                                 size_t offset,
                                 GraphicsAllocation *gfxAlloc,
                                 cl_mem_flags flags,
-                                cl_mem_flags_intel flagsIntel);
+                                cl_mem_flags_intel flagsIntel,
+                                bool useGlobalAtomics,
+                                bool areMultipleSubDevicesInContext);
 
-    static void provideCompressionHint(GraphicsAllocation::AllocationType allocationType,
-                                       Context *context,
-                                       Buffer *buffer);
+    static void provideCompressionHint(bool compressionEnabled, Context *context, Buffer *buffer);
 
     BufferCreatFunc createFunction = nullptr;
     bool isSubBuffer();
     bool isValidSubBufferOffset(size_t offset);
     uint64_t setArgStateless(void *memory, uint32_t patchSize, uint32_t rootDeviceIndex, bool set32BitAddressing);
-    virtual void setArgStateful(void *memory, bool forceNonAuxMode, bool disableL3, bool alignSizeForAuxTranslation, bool isReadOnly, const Device &device) = 0;
+    virtual void setArgStateful(void *memory, bool forceNonAuxMode, bool disableL3, bool alignSizeForAuxTranslation,
+                                bool isReadOnly, const Device &device, bool useGlobalAtomics, bool areMultipleSubDevicesInContext) = 0;
     bool bufferRectPitchSet(const size_t *bufferOrigin,
                             const size_t *region,
                             size_t &bufferRowPitch,
                             size_t &bufferSlicePitch,
                             size_t &hostRowPitch,
-                            size_t &hostSlicePitch);
+                            size_t &hostSlicePitch,
+                            bool isSrcBuffer);
 
     static size_t calculateHostPtrSize(const size_t *origin, const size_t *region, size_t rowPitch, size_t slicePitch);
 
     void transferDataToHostPtr(MemObjSizeArray &copySize, MemObjOffsetArray &copyOffset) override;
     void transferDataFromHostPtr(MemObjSizeArray &copySize, MemObjOffsetArray &copyOffset) override;
 
-    bool isReadWriteOnCpuAllowed(uint32_t rootDeviceIndex);
+    bool isReadWriteOnCpuAllowed(const Device &device);
     bool isReadWriteOnCpuPreferred(void *ptr, size_t size, const Device &device);
 
     uint32_t getMocsValue(bool disableL3Cache, bool isReadOnlyArgument, uint32_t rootDeviceIndex) const;
@@ -179,13 +184,15 @@ class Buffer : public MemObj {
                             bool &isZeroCopy,
                             bool &copyMemoryFromHostPtr,
                             MemoryManager *memMngr,
-                            uint32_t rootDeviceIndex);
-    static GraphicsAllocation::AllocationType getGraphicsAllocationType(const MemoryProperties &properties, Context &context,
-                                                                        bool renderCompressedBuffers, bool localMemoryEnabled,
-                                                                        bool preferCompression);
+                            uint32_t rootDeviceIndex,
+                            bool forceCopyHostPtr);
+    static GraphicsAllocation::AllocationType getGraphicsAllocationTypeAndCompressionPreference(const MemoryProperties &properties, Context &context,
+                                                                                                bool &compressionEnabled, bool localMemoryEnabled);
     static bool isReadOnlyMemoryPermittedByFlags(const MemoryProperties &properties);
 
     void transferData(void *dst, void *src, size_t copySize, size_t copyOffset);
+
+    void appendSurfaceStateArgs(EncodeSurfaceStateArgs &args);
 };
 
 template <typename GfxFamily>
@@ -205,9 +212,8 @@ class BufferHw : public Buffer {
         : Buffer(context, memoryProperties, flags, flagsIntel, size, memoryStorage, hostPtr, std::move(multiGraphicsAllocation),
                  zeroCopy, isHostPtrSVM, isObjectRedescribed) {}
 
-    void setArgStateful(void *memory, bool forceNonAuxMode, bool disableL3, bool alignSizeForAuxTranslation, bool isReadOnlyArgument, const Device &device) override;
-    void appendBufferState(void *memory, const Device &device, bool isReadOnlyArgument);
-    void appendSurfaceStateExt(void *memory);
+    void setArgStateful(void *memory, bool forceNonAuxMode, bool disableL3, bool alignSizeForAuxTranslation,
+                        bool isReadOnlyArgument, const Device &device, bool useGlobalAtomics, bool areMultipleSubDevicesInContext) override;
 
     static Buffer *create(Context *context,
                           MemoryProperties memoryProperties,

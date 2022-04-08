@@ -1,14 +1,15 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2022 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
  */
 
 #include "shared/source/os_interface/os_library.h"
-#include "shared/test/unit_test/helpers/test_files.h"
-
-#include "opencl/test/unit_test/custom_event_listener.h"
+#include "shared/test/common/helpers/custom_event_listener.h"
+#include "shared/test/common/helpers/test_files.h"
+#include "shared/test/common/libult/signal_utils.h"
+#include "shared/test/unit_test/test_stats.h"
 
 #include "environment.h"
 #include "limits.h"
@@ -20,6 +21,8 @@ const char *fSeparator = "/";
 #endif
 
 Environment *gEnvironment;
+extern PRODUCT_FAMILY productFamily;
+extern GFXCORE_FAMILY renderCoreFamily;
 
 std::string getRunPath() {
     char *cwd;
@@ -37,8 +40,12 @@ std::string getRunPath() {
 int main(int argc, char **argv) {
     int retVal = 0;
     bool useDefaultListener = false;
+    bool enableAlarm = true;
+    bool showTestStats = false;
+
     std::string devicePrefix("skl");
     std::string familyNameWithType("Gen9core");
+    std::string revId("0");
 
 #if defined(__linux__)
     if (getenv("CLOC_SELFTEST") == nullptr) {
@@ -66,12 +73,34 @@ int main(int argc, char **argv) {
         for (int i = 0; i < argc; i++) {
             if (strcmp("--use_default_listener", argv[i]) == 0) {
                 useDefaultListener = true;
+            } else if (!strcmp("--disable_alarm", argv[i])) {
+                enableAlarm = false;
             } else if (strcmp("--device", argv[i]) == 0) {
                 ++i;
                 devicePrefix = argv[i];
             } else if (strcmp("--family_type", argv[i]) == 0) {
                 ++i;
                 familyNameWithType = argv[i];
+            } else if (strcmp("--rev_id", argv[i]) == 0) {
+                ++i;
+                revId = argv[i];
+            } else if (!strcmp("--show_test_stats", argv[i])) {
+                showTestStats = true;
+            }
+        }
+    }
+
+    if (showTestStats) {
+        std::cout << getTestStats() << std::endl;
+        return 0;
+    }
+
+    for (unsigned int productId = 0; productId < IGFX_MAX_PRODUCT; ++productId) {
+        if (NEO::hardwarePrefix[productId] && (0 == strcmp(devicePrefix.c_str(), NEO::hardwarePrefix[productId]))) {
+            if (NEO::hardwareInfoTable[productId]) {
+                renderCoreFamily = NEO::hardwareInfoTable[productId]->platform.eRenderCoreFamily;
+                productFamily = NEO::hardwareInfoTable[productId]->platform.eProductFamily;
+                break;
             }
         }
     }
@@ -82,6 +111,8 @@ int main(int argc, char **argv) {
     std::string nTestFiles = getRunPath();
     nTestFiles.append("/");
     nTestFiles.append(familyNameWithType);
+    nTestFiles.append("/");
+    nTestFiles.append(revId);
     nTestFiles.append("/");
     nTestFiles.append(testFiles);
     testFiles = nTestFiles;
@@ -110,6 +141,10 @@ int main(int argc, char **argv) {
     }
 
     gEnvironment = reinterpret_cast<Environment *>(::testing::AddGlobalTestEnvironment(new Environment(devicePrefix, familyNameWithType)));
+
+    int sigOut = setAlarm(enableAlarm);
+    if (sigOut != 0)
+        return sigOut;
 
     retVal = RUN_ALL_TESTS();
 

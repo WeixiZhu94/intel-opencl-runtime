@@ -1,16 +1,16 @@
 /*
- * Copyright (C) 2018-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
  */
 
-#include "shared/source/helpers/preamble_bdw_plus.inl"
+#include "shared/source/helpers/preamble_bdw_and_later.inl"
 
 namespace NEO {
 
 template <>
-void PreambleHelper<BDWFamily>::addPipeControlBeforeVfeCmd(LinearStream *pCommandStream, const HardwareInfo *hwInfo, aub_stream::EngineType engineType) {
+void PreambleHelper<BDWFamily>::addPipeControlBeforeVfeCmd(LinearStream *pCommandStream, const HardwareInfo *hwInfo, EngineGroupType engineGroupType) {
     auto pipeControl = pCommandStream->getSpaceForCmd<PIPE_CONTROL>();
     PIPE_CONTROL cmd = BDWFamily::cmdInitPipeControl;
     cmd.setCommandStreamerStallEnable(true);

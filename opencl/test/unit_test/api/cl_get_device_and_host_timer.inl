@@ -1,22 +1,30 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
  */
 
+#include "shared/test/common/mocks/mock_ostime.h"
+
 #include "opencl/test/unit_test/fixtures/cl_device_fixture.h"
-#include "opencl/test/unit_test/mocks/mock_ostime.h"
 
 #include "cl_api_tests.h"
 
 using namespace NEO;
 
-struct FailOSTime : public MockOSTime {
-  public:
-    bool getCpuGpuTime(TimeStampData *pGpuCpuTime) override {
+struct FailDeviceTime : public MockDeviceTime {
+    bool getCpuGpuTime(TimeStampData *pGpuCpuTime, OSTime *) override {
         return false;
     }
+};
+
+struct FailOSTime : public MockOSTime {
+  public:
+    FailOSTime() {
+        this->deviceTime = std::make_unique<FailDeviceTime>();
+    }
+
     bool getCpuTime(uint64_t *timeStamp) override {
         return false;
     };

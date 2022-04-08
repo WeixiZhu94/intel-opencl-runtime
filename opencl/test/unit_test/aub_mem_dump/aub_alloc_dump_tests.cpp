@@ -1,23 +1,24 @@
 /*
- * Copyright (C) 2019-2020 Intel Corporation
+ * Copyright (C) 2019-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
  */
 
+#include "shared/source/aub_mem_dump/aub_alloc_dump.h"
 #include "shared/source/gmm_helper/gmm.h"
 #include "shared/source/gmm_helper/gmm_helper.h"
-#include "shared/test/unit_test/helpers/debug_manager_state_restore.h"
+#include "shared/test/common/helpers/debug_manager_state_restore.h"
+#include "shared/test/common/mocks/mock_allocation_properties.h"
+#include "shared/test/common/mocks/mock_gmm.h"
+#include "shared/test/common/mocks/mock_gmm_resource_info.h"
+#include "shared/test/common/mocks/mock_memory_manager.h"
+#include "shared/test/common/test_macros/test.h"
 
-#include "opencl/source/aub_mem_dump/aub_alloc_dump.h"
 #include "opencl/source/mem_obj/buffer.h"
 #include "opencl/test/unit_test/fixtures/cl_device_fixture.h"
 #include "opencl/test/unit_test/fixtures/image_fixture.h"
-#include "opencl/test/unit_test/mocks/mock_allocation_properties.h"
-#include "opencl/test/unit_test/mocks/mock_gmm.h"
-#include "opencl/test/unit_test/mocks/mock_gmm_resource_info.h"
-#include "opencl/test/unit_test/mocks/mock_memory_manager.h"
-#include "test.h"
+#include "opencl/test/unit_test/mocks/mock_buffer.h"
 
 using namespace NEO;
 
@@ -46,14 +47,6 @@ HWTEST_F(AubAllocDumpTests, givenBufferOrImageWhenGraphicsAllocationIsKnownThenI
     EXPECT_FALSE(AubAllocDump::isWritableBuffer(*gfxAllocation));
 
     gfxAllocation->setAllocationType(GraphicsAllocation::AllocationType::BUFFER);
-    gfxAllocation->setMemObjectsAllocationWithWritableFlags(true);
-    EXPECT_TRUE(AubAllocDump::isWritableBuffer(*gfxAllocation));
-
-    gfxAllocation->setAllocationType(GraphicsAllocation::AllocationType::BUFFER_COMPRESSED);
-    gfxAllocation->setMemObjectsAllocationWithWritableFlags(false);
-    EXPECT_FALSE(AubAllocDump::isWritableBuffer(*gfxAllocation));
-
-    gfxAllocation->setAllocationType(GraphicsAllocation::AllocationType::BUFFER_COMPRESSED);
     gfxAllocation->setMemObjectsAllocationWithWritableFlags(true);
     EXPECT_TRUE(AubAllocDump::isWritableBuffer(*gfxAllocation));
 
@@ -355,7 +348,7 @@ HWTEST_F(AubAllocDumpTests, givenCompressedImageWritableWhenDumpAllocationIsCall
     ASSERT_NE(nullptr, image);
 
     auto gfxAllocation = image->getGraphicsAllocation(pClDevice->getRootDeviceIndex());
-    gfxAllocation->getDefaultGmm()->isRenderCompressed = true;
+    gfxAllocation->getDefaultGmm()->isCompressionEnabled = true;
 
     std::unique_ptr<AubFileStreamMock> mockAubFileStream(new AubFileStreamMock());
     auto handle = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(this));
@@ -421,7 +414,7 @@ HWTEST_P(AubSurfaceDumpTests, givenGraphicsAllocationWhenGetDumpSurfaceIsCalledA
         auto bufferAllocation = memoryManager.allocateGraphicsMemoryWithProperties(MockAllocationProperties{pDevice->getRootDeviceIndex(), MemoryConstants::pageSize});
         ASSERT_NE(nullptr, bufferAllocation);
 
-        bufferAllocation->setAllocationType(isCompressed ? GraphicsAllocation::AllocationType::BUFFER_COMPRESSED : GraphicsAllocation::AllocationType::BUFFER);
+        MockBuffer::setAllocationType(bufferAllocation, pDevice->getRootDeviceEnvironment().getGmmClientContext(), isCompressed);
 
         std::unique_ptr<aub_stream::SurfaceInfo> surfaceInfo(AubAllocDump::getDumpSurfaceInfo<FamilyType>(*bufferAllocation, dumpFormat));
         if (nullptr != surfaceInfo) {
@@ -434,26 +427,26 @@ HWTEST_P(AubSurfaceDumpTests, givenGraphicsAllocationWhenGetDumpSurfaceIsCalledA
             EXPECT_EQ(SURFACE_FORMAT::SURFACE_FORMAT_RAW, surfaceInfo->format);
             EXPECT_EQ(RENDER_SURFACE_STATE::SURFACE_TYPE_SURFTYPE_BUFFER, surfaceInfo->surftype);
             EXPECT_EQ(RENDER_SURFACE_STATE::TILE_MODE_LINEAR, surfaceInfo->tilingType);
-            EXPECT_EQ(GraphicsAllocation::AllocationType::BUFFER_COMPRESSED == bufferAllocation->getAllocationType(), surfaceInfo->compressed);
+            EXPECT_EQ(bufferAllocation->isCompressionEnabled(), surfaceInfo->compressed);
             EXPECT_EQ((AubAllocDump::DumpFormat::BUFFER_TRE == dumpFormat) ? aub_stream::dumpType::tre : aub_stream::dumpType::bin, surfaceInfo->dumpType);
         }
         memoryManager.freeGraphicsMemory(bufferAllocation);
     }
 
     if (AubAllocDump::isImageDumpFormat(dumpFormat)) {
-        cl_image_desc imgDesc = {};
-        imgDesc.image_width = 512;
-        imgDesc.image_height = 1;
-        imgDesc.image_type = CL_MEM_OBJECT_IMAGE2D;
+        ImageDescriptor imgDesc = {};
+        imgDesc.imageWidth = 512;
+        imgDesc.imageHeight = 1;
+        imgDesc.imageType = ImageType::Image2D;
         auto imgInfo = MockGmm::initImgInfo(imgDesc, 0, nullptr);
-        MockGmm::queryImgParams(pDevice->getGmmClientContext(), imgInfo);
+        MockGmm::queryImgParams(pDevice->getGmmClientContext(), imgInfo, false);
         AllocationData allocationData;
         allocationData.imgInfo = &imgInfo;
         auto imageAllocation = memoryManager.allocateGraphicsMemoryForImage(allocationData);
         ASSERT_NE(nullptr, imageAllocation);
 
         auto gmm = imageAllocation->getDefaultGmm();
-        gmm->isRenderCompressed = isCompressed;
+        gmm->isCompressionEnabled = isCompressed;
 
         std::unique_ptr<aub_stream::SurfaceInfo> surfaceInfo(AubAllocDump::getDumpSurfaceInfo<FamilyType>(*imageAllocation, dumpFormat));
         if (nullptr != surfaceInfo) {
@@ -464,7 +457,7 @@ HWTEST_P(AubSurfaceDumpTests, givenGraphicsAllocationWhenGetDumpSurfaceIsCalledA
             EXPECT_EQ(static_cast<uint32_t>(gmm->gmmResourceInfo->getResourceFormatSurfaceState()), surfaceInfo->format);
             EXPECT_EQ(AubAllocDump::getImageSurfaceTypeFromGmmResourceType<FamilyType>(gmm->gmmResourceInfo->getResourceType()), surfaceInfo->surftype);
             EXPECT_EQ(gmm->gmmResourceInfo->getTileModeSurfaceState(), surfaceInfo->tilingType);
-            EXPECT_EQ(gmm->isRenderCompressed, surfaceInfo->compressed);
+            EXPECT_EQ(gmm->isCompressionEnabled, surfaceInfo->compressed);
             EXPECT_EQ((AubAllocDump::DumpFormat::IMAGE_TRE == dumpFormat) ? aub_stream::dumpType::tre : aub_stream::dumpType::bmp, surfaceInfo->dumpType);
         }
         memoryManager.freeGraphicsMemory(imageAllocation);

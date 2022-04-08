@@ -1,11 +1,13 @@
 /*
- * Copyright (C) 2020 Intel Corporation
+ * Copyright (C) 2020-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
  */
 
 #include "level_zero/tools/source/sysman/power/power.h"
+
+#include "shared/source/helpers/basic_math.h"
 
 #include "level_zero/tools/source/sysman/power/power_imp.h"
 
@@ -17,44 +19,37 @@ PowerHandleContext::~PowerHandleContext() {
     }
 }
 
-void PowerHandleContext::init() {
-    Power *pPower = new PowerImp(pOsSysman);
+void PowerHandleContext::createHandle(ze_device_handle_t deviceHandle) {
+    Power *pPower = new PowerImp(pOsSysman, deviceHandle);
     if (pPower->initSuccess == true) {
         handleList.push_back(pPower);
     } else {
         delete pPower;
     }
 }
+ze_result_t PowerHandleContext::init(std::vector<ze_device_handle_t> &deviceHandles, ze_device_handle_t coreDevice) {
+    // Create Handle for device level power
+    if (deviceHandles.size() > 1) {
+        createHandle(coreDevice);
+    }
 
-ze_result_t PowerHandleContext::powerGet(uint32_t *pCount, zet_sysman_pwr_handle_t *phPower) {
-    if (nullptr == phPower) {
-        *pCount = static_cast<uint32_t>(handleList.size());
-        return ZE_RESULT_SUCCESS;
+    for (const auto &deviceHandle : deviceHandles) {
+        createHandle(deviceHandle);
     }
-    uint32_t i = 0;
-    for (Power *power : handleList) {
-        if (i >= *pCount) {
-            break;
-        }
-        phPower[i++] = power->toHandle();
-    }
-    *pCount = i;
     return ZE_RESULT_SUCCESS;
 }
 
 ze_result_t PowerHandleContext::powerGet(uint32_t *pCount, zes_pwr_handle_t *phPower) {
-    if (nullptr == phPower) {
-        *pCount = static_cast<uint32_t>(handleList.size());
-        return ZE_RESULT_SUCCESS;
+    uint32_t handleListSize = static_cast<uint32_t>(handleList.size());
+    uint32_t numToCopy = std::min(*pCount, handleListSize);
+    if (0 == *pCount || *pCount > handleListSize) {
+        *pCount = handleListSize;
     }
-    uint32_t i = 0;
-    for (Power *power : handleList) {
-        if (i >= *pCount) {
-            break;
+    if (nullptr != phPower) {
+        for (uint32_t i = 0; i < numToCopy; i++) {
+            phPower[i] = handleList[i]->toHandle();
         }
-        phPower[i++] = power->toZesPwrHandle();
     }
-    *pCount = i;
     return ZE_RESULT_SUCCESS;
 }
 

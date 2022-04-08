@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 Intel Corporation
+ * Copyright (C) 2020-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -25,7 +25,8 @@ enum class DeviceBinaryFormat : uint8_t {
     OclLibrary,
     OclCompiledObject,
     Patchtokens,
-    Archive
+    Archive,
+    Zebin
 };
 
 enum class DecodeError : uint8_t {
@@ -54,8 +55,10 @@ inline const char *asString(DecodeError err) {
 
 struct TargetDevice {
     GFXCORE_FAMILY coreFamily = IGFX_UNKNOWN_CORE;
+    PRODUCT_FAMILY productFamily = IGFX_UNKNOWN;
     uint32_t stepping = 0U;
     uint32_t maxPointerSizeInBytes = 4U;
+    uint32_t grfSize = 32U;
 };
 
 struct SingleDeviceBinary {
@@ -76,6 +79,8 @@ template <>
 bool isDeviceBinaryFormat<DeviceBinaryFormat::Patchtokens>(const ArrayRef<const uint8_t>);
 template <>
 bool isDeviceBinaryFormat<DeviceBinaryFormat::Archive>(const ArrayRef<const uint8_t>);
+template <>
+bool isDeviceBinaryFormat<DeviceBinaryFormat::Zebin>(const ArrayRef<const uint8_t>);
 
 inline bool isAnyDeviceBinaryFormat(const ArrayRef<const uint8_t> binary) {
     if (isDeviceBinaryFormat<DeviceBinaryFormat::OclElf>(binary)) {
@@ -85,6 +90,9 @@ inline bool isAnyDeviceBinaryFormat(const ArrayRef<const uint8_t> binary) {
         return true;
     }
     if (isDeviceBinaryFormat<DeviceBinaryFormat::Archive>(binary)) {
+        return true;
+    }
+    if (isDeviceBinaryFormat<DeviceBinaryFormat::Zebin>(binary)) {
         return true;
     }
     return false;
@@ -100,6 +108,8 @@ template <>
 SingleDeviceBinary unpackSingleDeviceBinary<DeviceBinaryFormat::Patchtokens>(const ArrayRef<const uint8_t>, const ConstStringRef, const TargetDevice &, std::string &, std::string &);
 template <>
 SingleDeviceBinary unpackSingleDeviceBinary<DeviceBinaryFormat::Archive>(const ArrayRef<const uint8_t>, const ConstStringRef, const TargetDevice &, std::string &, std::string &);
+template <>
+SingleDeviceBinary unpackSingleDeviceBinary<DeviceBinaryFormat::Zebin>(const ArrayRef<const uint8_t>, const ConstStringRef, const TargetDevice &, std::string &, std::string &);
 
 inline SingleDeviceBinary unpackSingleDeviceBinary(const ArrayRef<const uint8_t> archive, const ConstStringRef requestedProductAbbreviation, const TargetDevice &requestedTargetDevice,
                                                    std::string &outErrReason, std::string &outWarning) {
@@ -111,6 +121,8 @@ inline SingleDeviceBinary unpackSingleDeviceBinary(const ArrayRef<const uint8_t>
         return unpackSingleDeviceBinary<DeviceBinaryFormat::Patchtokens>(archive, requestedProductAbbreviation, requestedTargetDevice, outErrReason, outWarning);
     } else if (isDeviceBinaryFormat<DeviceBinaryFormat::Archive>(archive)) {
         return unpackSingleDeviceBinary<DeviceBinaryFormat::Archive>(archive, requestedProductAbbreviation, requestedTargetDevice, outErrReason, outWarning);
+    } else if (isDeviceBinaryFormat<DeviceBinaryFormat::Zebin>(archive)) {
+        return unpackSingleDeviceBinary<DeviceBinaryFormat::Zebin>(archive, requestedProductAbbreviation, requestedTargetDevice, outErrReason, outWarning);
     } else {
         outErrReason = "Unknown format";
     }
@@ -132,11 +144,14 @@ inline bool isAnyPackedDeviceBinaryFormat(const ArrayRef<const uint8_t> binary) 
     if (isDeviceBinaryFormat<DeviceBinaryFormat::Archive>(binary)) {
         return true;
     }
+    if (isDeviceBinaryFormat<DeviceBinaryFormat::Zebin>(binary)) {
+        return true;
+    }
     return false;
 }
 
 inline bool isAnySingleDeviceBinaryFormat(const ArrayRef<const uint8_t> binary) {
-    return (false == isAnyPackedDeviceBinaryFormat(binary)) && isAnyDeviceBinaryFormat(binary);
+    return ((false == isAnyPackedDeviceBinaryFormat(binary)) && isAnyDeviceBinaryFormat(binary)) || isDeviceBinaryFormat<DeviceBinaryFormat::Zebin>(binary);
 }
 
 template <DeviceBinaryFormat Format>
@@ -148,6 +163,8 @@ template <>
 DecodeError decodeSingleDeviceBinary<DeviceBinaryFormat::Patchtokens>(ProgramInfo &, const SingleDeviceBinary &, std::string &, std::string &);
 template <>
 DecodeError decodeSingleDeviceBinary<DeviceBinaryFormat::Archive>(ProgramInfo &, const SingleDeviceBinary &, std::string &, std::string &);
+template <>
+DecodeError decodeSingleDeviceBinary<DeviceBinaryFormat::Zebin>(ProgramInfo &, const SingleDeviceBinary &, std::string &, std::string &);
 
 inline std::pair<DecodeError, DeviceBinaryFormat> decodeSingleDeviceBinary(ProgramInfo &dst, const SingleDeviceBinary &src, std::string &outErrReason, std::string &outWarning) {
     std::pair<DecodeError, DeviceBinaryFormat> ret;
@@ -162,6 +179,9 @@ inline std::pair<DecodeError, DeviceBinaryFormat> decodeSingleDeviceBinary(Progr
     } else if (isDeviceBinaryFormat<DeviceBinaryFormat::Archive>(src.deviceBinary)) {
         ret.second = DeviceBinaryFormat::Archive;
         ret.first = decodeSingleDeviceBinary<DeviceBinaryFormat::Archive>(dst, src, outErrReason, outWarning);
+    } else if (isDeviceBinaryFormat<DeviceBinaryFormat::Zebin>(src.deviceBinary)) {
+        ret.second = DeviceBinaryFormat::Zebin;
+        ret.first = decodeSingleDeviceBinary<DeviceBinaryFormat::Zebin>(dst, src, outErrReason, outWarning);
     } else {
         outErrReason = "Unknown format";
     }

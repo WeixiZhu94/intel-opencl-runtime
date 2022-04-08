@@ -1,16 +1,19 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
  */
 
 #include "shared/source/helpers/hw_info.h"
-#include "shared/test/unit_test/mocks/mock_device.h"
+#include "shared/test/common/helpers/unit_test_helper.h"
+#include "shared/test/common/mocks/mock_device.h"
+#include "shared/test/common/mocks/mock_memory_manager.h"
 
 #include "opencl/source/context/context.h"
 #include "opencl/source/mem_obj/image.h"
-#include "opencl/test/unit_test/helpers/unit_test_helper.h"
+#include "opencl/test/unit_test/fixtures/image_fixture.h"
+#include "opencl/test/unit_test/fixtures/multi_root_device_fixture.h"
 #include "opencl/test/unit_test/mocks/mock_cl_device.h"
 #include "opencl/test/unit_test/test_macros/test_checks_ocl.h"
 
@@ -149,6 +152,7 @@ TEST_F(clCreateImageTest, GivenDeviceThatDoesntSupportImagesWhenCreatingImageWit
     auto image = clCreateImageWithPropertiesINTEL(
         &mockContext,
         nullptr,
+        0,
         &imageFormat,
         &imageDesc,
         nullptr,
@@ -399,6 +403,7 @@ TEST_F(clCreateImageTest, GivenDeviceNotSupportingImagesWhenCreatingImageFromBuf
     auto image = clCreateImageWithPropertiesINTEL(
         pContext.get(),
         nullptr,
+        0,
         &imageFormat,
         &imageDesc,
         nullptr,
@@ -704,12 +709,14 @@ TEST_P(clCreateImageInvalidFlags, GivenInvalidFlagsCombinationsWhenCreatingImage
 
     ASSERT_EQ(CL_INVALID_VALUE, retVal);
     EXPECT_EQ(nullptr, image);
+    retVal = clReleaseMemObject(image);
+    EXPECT_EQ(CL_INVALID_MEM_OBJECT, retVal);
 
     cl_mem_properties_intel properties[] = {CL_MEM_FLAGS, flags, 0};
-
     image = clCreateImageWithPropertiesINTEL(
         pContext,
         properties,
+        0,
         &imageFormat,
         &imageDesc,
         ptr,
@@ -717,7 +724,20 @@ TEST_P(clCreateImageInvalidFlags, GivenInvalidFlagsCombinationsWhenCreatingImage
 
     ASSERT_EQ(CL_INVALID_PROPERTY, retVal);
     EXPECT_EQ(nullptr, image);
+    retVal = clReleaseMemObject(image);
+    EXPECT_EQ(CL_INVALID_MEM_OBJECT, retVal);
 
+    image = clCreateImageWithPropertiesINTEL(
+        pContext,
+        nullptr,
+        flags,
+        &imageFormat,
+        &imageDesc,
+        ptr,
+        &retVal);
+
+    ASSERT_EQ(CL_INVALID_VALUE, retVal);
+    EXPECT_EQ(nullptr, image);
     retVal = clReleaseMemObject(image);
     EXPECT_EQ(CL_INVALID_MEM_OBJECT, retVal);
 }
@@ -1079,6 +1099,7 @@ TEST_F(clCreateImageWithPropertiesINTELTest, GivenInvalidContextWhenCreatingImag
     auto image = clCreateImageWithPropertiesINTEL(
         nullptr,
         nullptr,
+        0,
         nullptr,
         nullptr,
         nullptr,
@@ -1091,10 +1112,25 @@ TEST_F(clCreateImageWithPropertiesINTELTest, GivenInvalidContextWhenCreatingImag
 TEST_F(clCreateImageWithPropertiesINTELTest, GivenValidParametersWhenCreatingImageWithPropertiesThenImageIsCreatedAndSuccessReturned) {
 
     cl_mem_properties_intel properties[] = {CL_MEM_FLAGS, CL_MEM_READ_WRITE, 0};
-
     auto image = clCreateImageWithPropertiesINTEL(
         pContext,
         properties,
+        0,
+        &imageFormat,
+        &imageDesc,
+        nullptr,
+        &retVal);
+
+    ASSERT_EQ(CL_SUCCESS, retVal);
+    EXPECT_NE(nullptr, image);
+
+    retVal = clReleaseMemObject(image);
+    EXPECT_EQ(CL_SUCCESS, retVal);
+
+    image = clCreateImageWithPropertiesINTEL(
+        pContext,
+        nullptr,
+        CL_MEM_READ_WRITE,
         &imageFormat,
         &imageDesc,
         nullptr,
@@ -1114,6 +1150,7 @@ TEST_F(clCreateImageWithPropertiesINTELTest, GivenInvalidPropertyKeyWhenCreating
     auto image = clCreateImageWithPropertiesINTEL(
         pContext,
         properties,
+        0,
         &imageFormat,
         &imageDesc,
         nullptr,
@@ -1324,4 +1361,59 @@ TEST_P(clCreateNon2dImageFromImageTest, GivenImage2dWhenCreatingImageFromNon2dIm
 INSTANTIATE_TEST_CASE_P(clCreateNon2dImageFromImageTests,
                         clCreateNon2dImageFromImageTest,
                         ::testing::ValuesIn(non2dImageTypes));
+
+using clCreateImageWithMultiDeviceContextTests = MultiRootDeviceFixture;
+
+TEST_F(clCreateImageWithMultiDeviceContextTests, GivenImageCreatedWithoutHostPtrAndWithContextdWithMultiDeviceThenGraphicsAllocationsAreProperlyCreatedAndMapPtrIsNotSet) {
+    REQUIRE_IMAGES_OR_SKIP(defaultHwInfo);
+
+    std::unique_ptr<Image> image(ImageHelper<ImageWithoutHostPtr>::create(context.get()));
+
+    EXPECT_EQ(image->getMultiGraphicsAllocation().getGraphicsAllocations().size(), 3u);
+    EXPECT_NE(image->getMultiGraphicsAllocation().getGraphicsAllocation(1u), nullptr);
+    EXPECT_NE(image->getMultiGraphicsAllocation().getGraphicsAllocation(2u), nullptr);
+    EXPECT_NE(image->getMultiGraphicsAllocation().getGraphicsAllocation(1u), image->getMultiGraphicsAllocation().getGraphicsAllocation(2u));
+
+    EXPECT_EQ(image->getAllocatedMapPtr(), nullptr);
+    EXPECT_TRUE(image->getMultiGraphicsAllocation().requiresMigrations());
+}
+
+TEST_F(clCreateImageWithMultiDeviceContextTests, GivenImageCreatedWithHostPtrAndWithContextdWithMultiDeviceThenGraphicsAllocationsAreProperlyCreatedAndMapPtrIsNotSet) {
+    REQUIRE_IMAGES_OR_SKIP(defaultHwInfo);
+    DebugManagerStateRestore dbgRestore;
+
+    std::unique_ptr<Image> image(ImageHelper<ImageUseHostPtr<Image1dDefaults>>::create(context.get()));
+
+    EXPECT_EQ(image->getMultiGraphicsAllocation().getGraphicsAllocations().size(), 3u);
+    EXPECT_NE(image->getMultiGraphicsAllocation().getGraphicsAllocation(1u), nullptr);
+    EXPECT_NE(image->getMultiGraphicsAllocation().getGraphicsAllocation(2u), nullptr);
+    EXPECT_NE(image->getMultiGraphicsAllocation().getGraphicsAllocation(1u), image->getMultiGraphicsAllocation().getGraphicsAllocation(2u));
+
+    EXPECT_TRUE(image->getMultiGraphicsAllocation().requiresMigrations());
+
+    EXPECT_EQ(image->getAllocatedMapPtr(), nullptr);
+}
+
+TEST_F(clCreateImageWithMultiDeviceContextTests, GivenContextdWithMultiDeviceFailingAllocationThenImageAllocateFails) {
+    REQUIRE_IMAGES_OR_SKIP(defaultHwInfo);
+
+    {
+        static_cast<MockMemoryManager *>(context.get()->getMemoryManager())->successAllocatedGraphicsMemoryIndex = 0u;
+        static_cast<MockMemoryManager *>(context.get()->getMemoryManager())->maxSuccessAllocatedGraphicsMemoryIndex = 0u;
+
+        std::unique_ptr<Image> image(ImageHelper<ImageWithoutHostPtr>::create(context.get()));
+
+        EXPECT_EQ(nullptr, image);
+    }
+
+    {
+        static_cast<MockMemoryManager *>(context.get()->getMemoryManager())->successAllocatedGraphicsMemoryIndex = 0u;
+        static_cast<MockMemoryManager *>(context.get()->getMemoryManager())->maxSuccessAllocatedGraphicsMemoryIndex = 1u;
+
+        std::unique_ptr<Image> image(ImageHelper<ImageWithoutHostPtr>::create(context.get()));
+
+        EXPECT_EQ(nullptr, image);
+    }
+}
+
 } // namespace ClCreateImageTests

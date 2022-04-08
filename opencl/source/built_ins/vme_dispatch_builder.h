@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -13,6 +13,7 @@
 #include "opencl/source/accelerators/intel_motion_estimation.h"
 #include "opencl/source/built_ins/built_in_ops_vme.h"
 #include "opencl/source/built_ins/builtins_dispatch_builder.h"
+#include "opencl/source/cl_device/cl_device.h"
 #include "opencl/source/helpers/dispatch_info_builder.h"
 #include "opencl/source/mem_obj/buffer.h"
 #include "opencl/source/mem_obj/image.h"
@@ -20,12 +21,14 @@
 namespace NEO {
 class VmeBuiltinDispatchInfoBuilder : public BuiltinDispatchInfoBuilder {
   public:
-    VmeBuiltinDispatchInfoBuilder(BuiltIns &kernelsLib, Device &device, EBuiltInOps::Type builtinOp,
+    VmeBuiltinDispatchInfoBuilder(BuiltIns &kernelsLib, ClDevice &device, EBuiltInOps::Type builtinOp,
                                   const char *kernelName)
-        : BuiltinDispatchInfoBuilder(kernelsLib) {
-        populate(device, builtinOp,
+        : BuiltinDispatchInfoBuilder(kernelsLib, device) {
+        populate(builtinOp,
                  mediaKernelsBuildOptions,
-                 kernelName, vmeKernel);
+                 kernelName, multiDeviceVmeKernel);
+        auto rootDeviceIndex = device.getRootDeviceIndex();
+        vmeKernel = multiDeviceVmeKernel->getKernel(rootDeviceIndex);
         widthArgNum = vmeKernel->getKernelInfo().getArgNumByName("width");
         heightArgNum = vmeKernel->getKernelInfo().getArgNumByName("height");
         strideArgNum = vmeKernel->getKernelInfo().getArgNumByName("stride");
@@ -68,9 +71,9 @@ class VmeBuiltinDispatchInfoBuilder : public BuiltinDispatchInfoBuilder {
 
         // Update global work size to force macro-block to HW thread execution model
         Vec3<size_t> gws = {numThreadsX * simdWidth, 1, 1};
-        Vec3<size_t> lws = {vmeKernel->getKernelInfo().reqdWorkGroupSize[0], 1, 1};
+        Vec3<size_t> lws = {vmeKernel->getKernelInfo().kernelDescriptor.kernelAttributes.requiredWorkgroupSize[0], 1, 1};
 
-        DispatchInfoBuilder<SplitDispatch::Dim::d2D, SplitDispatch::SplitMode::NoSplit> builder;
+        DispatchInfoBuilder<SplitDispatch::Dim::d2D, SplitDispatch::SplitMode::NoSplit> builder(clDevice);
         builder.setDispatchGeometry(gws, lws, inOffset, gws, lws);
         builder.setKernel(vmeKernel);
         builder.bake(multiDispatchInfo);
@@ -163,14 +166,15 @@ class VmeBuiltinDispatchInfoBuilder : public BuiltinDispatchInfoBuilder {
 
     template <typename RetType>
     RetType getKernelArgByValValue(uint32_t argNum) const {
-        auto &kai = vmeKernel->getKernelInfo().kernelArgInfo[argNum];
-        DEBUG_BREAK_IF(kai.kernelArgPatchInfoVector.size() != 1);
-        const KernelArgPatchInfo &patchInfo = kai.kernelArgPatchInfoVector[0];
-        DEBUG_BREAK_IF(sizeof(RetType) > patchInfo.size);
-        return *(RetType *)(vmeKernel->getCrossThreadData() + patchInfo.crossthreadOffset);
+        const auto &argAsVal = vmeKernel->getKernelInfo().kernelDescriptor.payloadMappings.explicitArgs[argNum].as<ArgDescValue>();
+        DEBUG_BREAK_IF(argAsVal.elements.size() != 1);
+
+        const auto &element = argAsVal.elements[0];
+        DEBUG_BREAK_IF(sizeof(RetType) > element.size);
+        return *(RetType *)(vmeKernel->getCrossThreadData() + element.offset);
     }
 
-    cl_int validateImages(Vec3<size_t> inputRegion, Vec3<size_t> offset) const {
+    cl_int validateImages(const Vec3<size_t> &inputRegion, const Vec3<size_t> &offset) const {
         Image *srcImg = castToObject<Image>((cl_mem)vmeKernel->getKernelArg(srcImgArgNum));
         Image *refImg = castToObject<Image>((cl_mem)vmeKernel->getKernelArg(refImgArgNum));
 
@@ -204,7 +208,7 @@ class VmeBuiltinDispatchInfoBuilder : public BuiltinDispatchInfoBuilder {
         return CL_SUCCESS;
     }
 
-    virtual cl_int validateVmeDispatch(Vec3<size_t> inputRegion, Vec3<size_t> offset, size_t blkNum, size_t blkMul) const {
+    virtual cl_int validateVmeDispatch(const Vec3<size_t> &inputRegion, const Vec3<size_t> &offset, size_t blkNum, size_t blkMul) const {
         {
             cl_int imageValidationStatus = validateImages(inputRegion, offset);
             if (imageValidationStatus != CL_SUCCESS) {
@@ -236,13 +240,14 @@ class VmeBuiltinDispatchInfoBuilder : public BuiltinDispatchInfoBuilder {
     int32_t motionVectorBufferArgNum;
     int32_t predictionMotionVectorBufferArgNum;
     int32_t residualsArgNum;
+    MultiDeviceKernel *multiDeviceVmeKernel;
     Kernel *vmeKernel;
 };
 
 template <>
 class BuiltInOp<EBuiltInOps::VmeBlockMotionEstimateIntel> : public VmeBuiltinDispatchInfoBuilder {
   public:
-    BuiltInOp(BuiltIns &kernelsLib, Device &device)
+    BuiltInOp(BuiltIns &kernelsLib, ClDevice &device)
         : VmeBuiltinDispatchInfoBuilder(kernelsLib, device,
                                         EBuiltInOps::VmeBlockMotionEstimateIntel, "block_motion_estimate_intel") {
     }
@@ -250,7 +255,7 @@ class BuiltInOp<EBuiltInOps::VmeBlockMotionEstimateIntel> : public VmeBuiltinDis
 
 class AdvancedVmeBuiltinDispatchInfoBuilder : public VmeBuiltinDispatchInfoBuilder {
   public:
-    AdvancedVmeBuiltinDispatchInfoBuilder(BuiltIns &kernelsLib, Device &device, EBuiltInOps::Type builtinOp,
+    AdvancedVmeBuiltinDispatchInfoBuilder(BuiltIns &kernelsLib, ClDevice &device, EBuiltInOps::Type builtinOp,
                                           const char *kernelName)
         : VmeBuiltinDispatchInfoBuilder(kernelsLib, device, builtinOp,
                                         kernelName) {
@@ -378,7 +383,7 @@ class AdvancedVmeBuiltinDispatchInfoBuilder : public VmeBuiltinDispatchInfoBuild
         return predictorsBufferExpSize;
     }
 
-    cl_int validateVmeDispatch(Vec3<size_t> inputRegion, Vec3<size_t> offset, size_t blkNum, size_t blkMul) const override {
+    cl_int validateVmeDispatch(const Vec3<size_t> &inputRegion, const Vec3<size_t> &offset, size_t blkNum, size_t blkMul) const override {
         cl_int basicVmeValidationStatus = VmeBuiltinDispatchInfoBuilder::validateVmeDispatch(inputRegion, offset, blkNum, blkMul);
         if (basicVmeValidationStatus != CL_SUCCESS) {
             return basicVmeValidationStatus;
@@ -442,12 +447,12 @@ class AdvancedVmeBuiltinDispatchInfoBuilder : public VmeBuiltinDispatchInfoBuild
 template <>
 class BuiltInOp<EBuiltInOps::VmeBlockAdvancedMotionEstimateCheckIntel> : public AdvancedVmeBuiltinDispatchInfoBuilder {
   public:
-    BuiltInOp(BuiltIns &kernelsLib, Device &device)
+    BuiltInOp(BuiltIns &kernelsLib, ClDevice &device)
         : AdvancedVmeBuiltinDispatchInfoBuilder(kernelsLib, device, EBuiltInOps::VmeBlockAdvancedMotionEstimateCheckIntel,
                                                 "block_advanced_motion_estimate_check_intel") {
     }
 
-    cl_int validateVmeDispatch(Vec3<size_t> inputRegion, Vec3<size_t> offset,
+    cl_int validateVmeDispatch(const Vec3<size_t> &inputRegion, const Vec3<size_t> &offset,
                                size_t gwWidthInBlk, size_t gwHeightInBlk) const override {
         cl_int basicAdvVmeValidationStatus = AdvancedVmeBuiltinDispatchInfoBuilder::validateVmeDispatch(inputRegion, offset, gwWidthInBlk, gwHeightInBlk);
         if (basicAdvVmeValidationStatus != CL_SUCCESS) {
@@ -466,7 +471,7 @@ class BuiltInOp<EBuiltInOps::VmeBlockAdvancedMotionEstimateCheckIntel> : public 
 template <>
 class BuiltInOp<EBuiltInOps::VmeBlockAdvancedMotionEstimateBidirectionalCheckIntel> : public AdvancedVmeBuiltinDispatchInfoBuilder {
   public:
-    BuiltInOp(BuiltIns &kernelsLib, Device &device)
+    BuiltInOp(BuiltIns &kernelsLib, ClDevice &device)
         : AdvancedVmeBuiltinDispatchInfoBuilder(kernelsLib, device, EBuiltInOps::VmeBlockAdvancedMotionEstimateBidirectionalCheckIntel,
                                                 "block_advanced_motion_estimate_bidirectional_check_intel") {
     }

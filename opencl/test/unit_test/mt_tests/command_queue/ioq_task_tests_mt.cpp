@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -86,7 +86,8 @@ TEST_F(IOQTaskTestsMt, GivenBlockedOnUserEventWhenEnqueingMarkerThenSuccessIsRet
 }
 
 TEST_F(IOQTaskTestsMt, GivenMultipleThreadsWhenMappingBufferThenEventsAreCompleted) {
-    AlignedBuffer alignedBuffer;
+    MockGraphicsAllocation alignedBufferAlloc{nullptr, MemoryConstants::pageSize};
+    AlignedBuffer alignedBuffer{pContext, &alignedBufferAlloc};
 
     auto userEvent = clCreateUserEvent(pContext, &retVal);
     EXPECT_EQ(CL_SUCCESS, retVal);

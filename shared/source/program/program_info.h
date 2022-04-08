@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 Intel Corporation
+ * Copyright (C) 2020-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -37,9 +37,13 @@ struct ProgramInfo {
 
     GlobalSurfaceInfo globalConstants;
     GlobalSurfaceInfo globalVariables;
+    GlobalSurfaceInfo globalStrings;
     std::unique_ptr<LinkerInput> linkerInput;
 
     std::vector<KernelInfo *> kernelInfos;
+    Elf::Elf<Elf::EI_CLASS_64> decodedElf;
+    uint32_t grfSize = 32U;
+    bool levelZeroDynamicLinkProgram = false;
 };
 
 size_t getMaxInlineSlmNeeded(const ProgramInfo &programInfo);

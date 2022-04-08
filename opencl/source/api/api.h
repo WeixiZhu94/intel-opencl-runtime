@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -126,6 +126,7 @@ cl_mem CL_API_CALL clCreateBuffer(
 cl_mem CL_API_CALL clCreateBufferWithPropertiesINTEL(
     cl_context context,
     const cl_mem_properties_intel *properties,
+    cl_mem_flags flags,
     size_t size,
     void *hostPtr,
     cl_int *errcodeRet);
@@ -148,6 +149,7 @@ cl_mem CL_API_CALL clCreateImage(
 cl_mem CL_API_CALL clCreateImageWithPropertiesINTEL(
     cl_context context,
     const cl_mem_properties_intel *properties,
+    cl_mem_flags flags,
     const cl_image_format *imageFormat,
     const cl_image_desc *imageDesc,
     void *hostPtr,
@@ -925,9 +927,17 @@ extern CL_API_ENTRY cl_program CL_API_CALL clCreateProgramWithILKHR(
     size_t length,
     cl_int *errcodeRet) CL_API_SUFFIX__VERSION_1_2;
 
+extern CL_API_ENTRY cl_int CL_API_CALL clGetKernelSuggestedLocalWorkSizeKHR(
+    cl_command_queue command_queue,
+    cl_kernel kernel,
+    cl_uint work_dim,
+    const size_t *global_work_offset,
+    const size_t *global_work_size,
+    size_t *suggested_local_work_size) CL_API_SUFFIX__VERSION_3_0;
+
 void *clHostMemAllocINTEL(
     cl_context context,
-    cl_mem_properties_intel *properties,
+    const cl_mem_properties_intel *properties,
     size_t size,
     cl_uint alignment,
     cl_int *errcodeRet);
@@ -935,7 +945,7 @@ void *clHostMemAllocINTEL(
 void *clDeviceMemAllocINTEL(
     cl_context context,
     cl_device_id device,
-    cl_mem_properties_intel *properties,
+    const cl_mem_properties_intel *properties,
     size_t size,
     cl_uint alignment,
     cl_int *errcodeRet);
@@ -943,14 +953,14 @@ void *clDeviceMemAllocINTEL(
 void *clSharedMemAllocINTEL(
     cl_context context,
     cl_device_id device,
-    cl_mem_properties_intel *properties,
+    const cl_mem_properties_intel *properties,
     size_t size,
     cl_uint alignment,
     cl_int *errcodeRet);
 
 cl_int clMemFreeINTEL(
     cl_context context,
-    const void *ptr);
+    void *ptr);
 
 cl_int clMemBlockingFreeINTEL(
     cl_context context,
@@ -1088,3 +1098,8 @@ cl_mem CL_API_CALL clCreateImageWithProperties(
     const cl_image_desc *imageDesc,
     void *hostPtr,
     cl_int *errcodeRet);
+
+cl_int CL_API_CALL clSetContextDestructorCallback(
+    cl_context context,
+    void(CL_CALLBACK *pfn_notify)(cl_context /* context */, void * /* user_data */),
+    void *user_data);

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2022 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -28,26 +28,30 @@ class OsLibrary;
 
 std::string convertToPascalCase(const std::string &inString);
 
-enum ErrorCode {
-    SUCCESS = 0,
-    OUT_OF_HOST_MEMORY = -6,
-    BUILD_PROGRAM_FAILURE = -11,
-    INVALID_DEVICE = -33,
-    INVALID_PROGRAM = -44,
-    INVALID_COMMAND_LINE = -5150,
-    INVALID_FILE = -5151,
-    PRINT_USAGE = -5152,
-};
-
 std::string generateFilePath(const std::string &directory, const std::string &fileNameBase, const char *extension);
 std::string getDevicesTypes();
 
 class OfflineCompiler {
   public:
+    static int query(size_t numArgs, const std::vector<std::string> &allArgs, OclocArgHelper *helper);
+
     static OfflineCompiler *create(size_t numArgs, const std::vector<std::string> &allArgs, bool dumpFiles, int &retVal, OclocArgHelper *helper);
     int build();
     std::string &getBuildLog();
     void printUsage();
+    std::string getDevicesConfigs();
+
+    static constexpr ConstStringRef queryHelp =
+        "Depending on <query_option> will generate file\n"
+        "(with a name adequate to <query_option>)\n"
+        "containing either driver version or NEO revision hash.\n\n"
+        "Usage: ocloc query <query_option>\n\n"
+        "Supported query options:\n"
+        "  OCL_DRIVER_VERSION  ; returns driver version\n"
+        "  NEO_REVISION        ; returns NEO revision hash\n\n"
+        "Examples:\n"
+        "  Extract driver version\n"
+        "    ocloc query OCL_DRIVER_VERSION\n";
 
     OfflineCompiler &operator=(const OfflineCompiler &) = delete;
     OfflineCompiler(const OfflineCompiler &) = delete;
@@ -74,18 +78,28 @@ class OfflineCompiler {
         return hwInfo;
     }
 
+    std::string getOptionsReadFromFile() const {
+        return optionsReadFromFile;
+    }
+
+    std::string getInternalOptionsReadFromFile() const {
+        return internalOptionsReadFromFile;
+    }
+
   protected:
     OfflineCompiler();
 
-    int getHardwareInfo(const char *pDeviceName);
+    void setFamilyType();
+    int initHardwareInfo(std::string deviceName);
     std::string getStringWithinDelimiters(const std::string &src);
     int initialize(size_t numArgs, const std::vector<std::string> &allArgs, bool dumpFiles);
     int parseCommandLine(size_t numArgs, const std::vector<std::string> &allArgs);
     void setStatelessToStatefullBufferOffsetFlag();
-    void resolveExtraSettings();
+    void appendExtraInternalOptions(std::string &internalOptions);
     void parseDebugSettings();
     void storeBinary(char *&pDst, size_t &dstSize, const void *pSrc, const size_t srcSize);
     MOCKABLE_VIRTUAL int buildSourceCode();
+    MOCKABLE_VIRTUAL std::string validateInputType(const std::string &input, bool isLlvm, bool isSpirv);
     int buildIrBinary();
     void updateBuildLog(const char *pErrorString, const size_t errorStringSize);
     MOCKABLE_VIRTUAL bool generateElfBinary();
@@ -100,8 +114,10 @@ class OfflineCompiler {
         return suffix;
     }
     MOCKABLE_VIRTUAL void writeOutAllFiles();
+    void unifyExcludeIrFlags();
     HardwareInfo hwInfo;
 
+    PRODUCT_CONFIG deviceConfig = UNKNOWN_ISA;
     std::string deviceName;
     std::string familyNameWithType;
     std::string inputFile;
@@ -111,8 +127,10 @@ class OfflineCompiler {
     std::string internalOptions;
     std::string sourceCode;
     std::string buildLog;
-    bool dumpFiles = true;
+    std::string optionsReadFromFile = "";
+    std::string internalOptionsReadFromFile = "";
 
+    bool dumpFiles = true;
     bool useLlvmText = false;
     bool useLlvmBc = false;
     bool useCppFile = false;
@@ -123,13 +141,15 @@ class OfflineCompiler {
     bool inputFileSpirV = false;
     bool outputNoSuffix = false;
     bool forceStatelessToStatefulOptimization = false;
+    bool isSpirV = false;
+    bool showHelp = false;
+    bool excludeIr = false;
 
     std::vector<uint8_t> elfBinary;
     char *genBinary = nullptr;
     size_t genBinarySize = 0;
     char *irBinary = nullptr;
     size_t irBinarySize = 0;
-    bool isSpirV = false;
     char *debugDataBinary = nullptr;
     size_t debugDataBinarySize = 0;
     struct buildInfo;
@@ -137,7 +157,7 @@ class OfflineCompiler {
     std::unique_ptr<OsLibrary> igcLib = nullptr;
     CIF::RAII::UPtr_t<CIF::CIFMain> igcMain = nullptr;
     CIF::RAII::UPtr_t<IGC::IgcOclDeviceCtxTagOCL> igcDeviceCtx = nullptr;
-    int revisionId = REVISION_A0;
+    int revisionId = -1;
 
     std::unique_ptr<OsLibrary> fclLib = nullptr;
     CIF::RAII::UPtr_t<CIF::CIFMain> fclMain = nullptr;

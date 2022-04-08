@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2022 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -24,7 +24,7 @@ TEST(QueueHelpersTest, givenCommandQueueWithoutVirtualEventWhenReleaseQueueIsCal
     cmdQ->incRefInternal();
     EXPECT_EQ(2, cmdQ->getRefInternalCount());
 
-    releaseQueue<CommandQueue>(cmdQ, retVal);
+    releaseQueue(cmdQ, retVal);
 
     EXPECT_EQ(1, cmdQ->getRefInternalCount());
     cmdQ->decRefInternal();
@@ -44,4 +44,26 @@ TEST(QueueHelpersTest, givenPropertyListWithPropertyOfValueZeroWhenGettingProper
             EXPECT_EQ(property2Value, getCmdQueueProperties<int>(properties, propertyName2));
         }
     }
+}
+
+TEST(QueueHelpersTest, givenPropertiesWhenGettingPropertyValuesThenReturnCorrectFoundPropertyValue) {
+    cl_queue_properties nonExistantProperty = 0xCC;
+    cl_queue_properties properties[] = {
+        0xAA,
+        3,
+        0xBB,
+        0,
+        0};
+
+    bool foundProperty = false;
+    EXPECT_EQ(properties[1], getCmdQueueProperties<cl_queue_properties>(properties, properties[0], &foundProperty));
+    EXPECT_TRUE(foundProperty);
+
+    foundProperty = false;
+    EXPECT_EQ(properties[3], getCmdQueueProperties<cl_queue_properties>(properties, properties[2], &foundProperty));
+    EXPECT_TRUE(foundProperty);
+
+    foundProperty = false;
+    EXPECT_EQ(0u, getCmdQueueProperties<cl_queue_properties>(properties, nonExistantProperty, &foundProperty));
+    EXPECT_FALSE(foundProperty);
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019-2020 Intel Corporation
+ * Copyright (C) 2020-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -9,7 +9,6 @@
 
 #include "level_zero/experimental/source/tracing/tracing.h"
 #include "level_zero/experimental/source/tracing/tracing_barrier_imp.h"
-#include "level_zero/experimental/source/tracing/tracing_cl_interop_imp.h"
 #include "level_zero/experimental/source/tracing/tracing_cmdlist_imp.h"
 #include "level_zero/experimental/source/tracing/tracing_cmdqueue_imp.h"
 #include "level_zero/experimental/source/tracing/tracing_copy_imp.h"
@@ -40,7 +39,7 @@ extern ze_gpu_driver_dditable_t driver_ddiTable;
 namespace L0 {
 
 extern thread_local ze_bool_t tracingInProgress;
-extern struct APITracerContextImp *PGLOBAL_APITracerContextImp;
+extern struct APITracerContextImp *pGlobalAPITracerContextImp;
 
 typedef struct tracer_array_entry {
     zet_core_callbacks_t corePrologues;
@@ -54,26 +53,6 @@ typedef struct tracerArray {
     tracer_array_entry_t *tracerArrayEntries;
 } tracer_array_t;
 
-typedef struct per_thread_public_tracer_data {
-    std::atomic<tracer_array_t *> tracerArrayPointer;
-    std::thread::id thread_id;
-} per_thread_tracer_data_t;
-
-class ThreadPrivateTracerData {
-  public:
-    per_thread_tracer_data_t *myThreadPublicTracerData;
-    void allocatePerThreadPublicTracerData();
-    void freePerThreadPublicTracerData();
-    ThreadPrivateTracerData();
-    ~ThreadPrivateTracerData();
-
-  private:
-    ThreadPrivateTracerData(const ThreadPrivateTracerData &);
-    ThreadPrivateTracerData &operator=(const ThreadPrivateTracerData &);
-};
-
-extern thread_local ThreadPrivateTracerData myThreadPrivateTracerData;
-
 typedef enum tracingState {
     disabledState,        // tracing has never been enabled
     enabledState,         // tracing is enabled.
@@ -81,7 +60,7 @@ typedef enum tracingState {
 } tracingState_t;
 
 struct APITracerImp : APITracer {
-    ze_result_t destroyTracer(zet_tracer_handle_t phTracer) override;
+    ze_result_t destroyTracer(zet_tracer_exp_handle_t phTracer) override;
     ze_result_t setPrologues(zet_core_callbacks_t *pCoreCbs) override;
     ze_result_t setEpilogues(zet_core_callbacks_t *pCoreCbs) override;
     ze_result_t enableTracer(ze_bool_t enable) override;
@@ -92,13 +71,30 @@ struct APITracerImp : APITracer {
   private:
 };
 
+class ThreadPrivateTracerData {
+  public:
+    void clearThreadTracerDataOnList(void) { onList = false; }
+    void removeThreadTracerDataFromList(void);
+    bool testAndSetThreadTracerDataInitializedAndOnList(void);
+    bool onList;
+    bool isInitialized;
+    ThreadPrivateTracerData();
+    ~ThreadPrivateTracerData();
+
+    std::atomic<tracer_array_t *> tracerArrayPointer;
+
+  private:
+    ThreadPrivateTracerData(const ThreadPrivateTracerData &);
+    ThreadPrivateTracerData &operator=(const ThreadPrivateTracerData &);
+};
+
 struct APITracerContextImp : APITracerContext {
   public:
     APITracerContextImp() {
         activeTracerArray.store(&emptyTracerArray, std::memory_order_relaxed);
     };
 
-    ~APITracerContextImp() override {}
+    ~APITracerContextImp() override;
 
     static void apiTracingEnable(ze_init_flag_t flag);
 
@@ -109,6 +105,9 @@ struct APITracerContextImp : APITracerContext {
     ze_result_t finalizeDisableImpTracingWait(struct APITracerImp *oldTracer);
 
     bool isTracingEnabled();
+
+    void addThreadTracerDataToList(ThreadPrivateTracerData *threadDataP);
+    void removeThreadTracerDataFromList(ThreadPrivateTracerData *threadDataP);
 
   private:
     std::mutex traceTableMutex;
@@ -128,8 +127,13 @@ struct APITracerContextImp : APITracerContext {
 
     ze_bool_t testForTracerArrayReferences(tracer_array_t *tracerArray);
     size_t testAndFreeRetiredTracers();
-    int updateTracerArrays();
+    size_t updateTracerArrays();
+
+    std::list<ThreadPrivateTracerData *> threadTracerDataList;
+    std::mutex threadTracerDataListMutex;
 };
+
+extern thread_local ThreadPrivateTracerData myThreadPrivateTracerData;
 
 template <class T>
 class APITracerCallbackStateImp {
@@ -161,7 +165,7 @@ class APITracerCallbackDataImp {
 
 #define ZE_GEN_PER_API_CALLBACK_STATE(perApiCallbackData, tracerType, callbackCategory, callbackFunctionType)                               \
     L0::tracer_array_t *currentTracerArray;                                                                                                 \
-    currentTracerArray = (L0::tracer_array_t *)L0::PGLOBAL_APITracerContextImp->getActiveTracersList();                                     \
+    currentTracerArray = (L0::tracer_array_t *)L0::pGlobalAPITracerContextImp->getActiveTracersList();                                      \
     if (currentTracerArray) {                                                                                                               \
         for (size_t i = 0; i < currentTracerArray->tracerArrayCount; i++) {                                                                 \
             tracerType prologueCallbackPtr;                                                                                                 \
@@ -187,7 +191,7 @@ ze_result_t APITracerWrapperImp(TFunction_pointer zeApiPtr,
                                 TTracer apiOrdinal,
                                 TTracerPrologCallbacks prologCallbacks,
                                 TTracerEpilogCallbacks epilogCallbacks,
-                                Args &&... args) {
+                                Args &&...args) {
     ze_result_t ret = ZE_RESULT_SUCCESS;
     std::vector<APITracerCallbackStateImp<TTracer>> *callbacks_prologs = &prologCallbacks;
 
@@ -205,7 +209,7 @@ ze_result_t APITracerWrapperImp(TFunction_pointer zeApiPtr,
             callbacksEpilogs->at(i).current_api_callback(paramsStruct, ret, callbacksEpilogs->at(i).pUserData, &ppTracerInstanceUserData[i]);
     }
     L0::tracingInProgress = 0;
-    L0::PGLOBAL_APITracerContextImp->releaseActivetracersList();
+    L0::pGlobalAPITracerContextImp->releaseActivetracersList();
     return ret;
 }
 

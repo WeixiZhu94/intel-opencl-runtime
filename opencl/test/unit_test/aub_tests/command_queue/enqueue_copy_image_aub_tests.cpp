@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -7,12 +7,12 @@
 
 #include "shared/source/command_stream/command_stream_receiver.h"
 #include "shared/source/helpers/ptr_math.h"
+#include "shared/source/memory_manager/os_agnostic_memory_manager.h"
+#include "shared/test/common/test_macros/test.h"
 
 #include "opencl/source/mem_obj/image.h"
-#include "opencl/source/memory_manager/os_agnostic_memory_manager.h"
 #include "opencl/test/unit_test/aub_tests/command_queue/command_enqueue_fixture.h"
 #include "opencl/test/unit_test/mocks/mock_context.h"
-#include "test.h"
 
 using namespace NEO;
 
@@ -49,7 +49,7 @@ struct AUBCopyImage
     std::unique_ptr<Image> dstImage;
 };
 
-HWTEST_P(AUBCopyImage, simple) {
+HWTEST_P(AUBCopyImage, WhenCopyingThenExpectationsMet) {
 
     const size_t testImageDimensions = 4;
     cl_float srcMemory[testImageDimensions * testImageDimensions] = {
@@ -87,7 +87,7 @@ HWTEST_P(AUBCopyImage, simple) {
     auto retVal = CL_INVALID_VALUE;
     srcImage.reset(Image::create(
         context.get(),
-        MemoryPropertiesHelper::createMemoryProperties(flags, 0, 0, &context->getDevice(0)->getDevice()),
+        ClMemoryPropertiesHelper::createMemoryProperties(flags, 0, 0, &context->getDevice(0)->getDevice()),
         flags,
         0,
         surfaceFormat,
@@ -98,7 +98,7 @@ HWTEST_P(AUBCopyImage, simple) {
 
     dstImage.reset(Image::create(
         context.get(),
-        MemoryPropertiesHelper::createMemoryProperties(flags, 0, 0, &context->getDevice(0)->getDevice()),
+        ClMemoryPropertiesHelper::createMemoryProperties(flags, 0, 0, &context->getDevice(0)->getDevice()),
         flags,
         0,
         surfaceFormat,

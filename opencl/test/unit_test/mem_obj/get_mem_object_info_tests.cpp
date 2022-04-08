@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -8,11 +8,13 @@
 #include "shared/source/debug_settings/debug_settings_manager.h"
 #include "shared/source/helpers/aligned_memory.h"
 #include "shared/source/helpers/ptr_math.h"
-#include "shared/test/unit_test/helpers/debug_manager_state_restore.h"
+#include "shared/test/common/helpers/debug_manager_state_restore.h"
+#include "shared/test/common/mocks/mock_gmm.h"
 
 #include "opencl/test/unit_test/fixtures/buffer_fixture.h"
 #include "opencl/test/unit_test/fixtures/cl_device_fixture.h"
 #include "opencl/test/unit_test/fixtures/platform_fixture.h"
+#include "opencl/test/unit_test/mocks/mock_buffer.h"
 #include "opencl/test/unit_test/mocks/mock_context.h"
 
 #include "gtest/gtest.h"
@@ -322,6 +324,42 @@ TEST_F(GetMemObjectInfo, GivenMemReferenceCountWhenGettingMemObjectInfoThenCorre
         &sizeReturned);
     EXPECT_EQ(CL_SUCCESS, retVal);
     EXPECT_EQ(sizeof(refCount), sizeReturned);
+}
+
+TEST_F(GetMemObjectInfo, GivenValidBufferWhenGettingCompressionOfMemObjectThenCorrectValueIsReturned) {
+    auto buffer = std::unique_ptr<Buffer>(BufferHelper<>::create());
+    auto graphicsAllocation = buffer->getMultiGraphicsAllocation().getDefaultGraphicsAllocation();
+
+    size_t sizeReturned = 0;
+    cl_bool usesCompression{};
+    cl_int retVal{};
+    retVal = buffer->getMemObjectInfo(
+        CL_MEM_USES_COMPRESSION_INTEL,
+        0,
+        nullptr,
+        &sizeReturned);
+    EXPECT_EQ(CL_SUCCESS, retVal);
+    ASSERT_EQ(sizeof(cl_bool), sizeReturned);
+
+    MockBuffer::setAllocationType(graphicsAllocation, pDevice->getRootDeviceEnvironment().getGmmClientContext(), true);
+
+    retVal = buffer->getMemObjectInfo(
+        CL_MEM_USES_COMPRESSION_INTEL,
+        sizeReturned,
+        &usesCompression,
+        nullptr);
+    EXPECT_EQ(CL_SUCCESS, retVal);
+    EXPECT_EQ(cl_bool{CL_TRUE}, usesCompression);
+
+    MockBuffer::setAllocationType(graphicsAllocation, pDevice->getRootDeviceEnvironment().getGmmClientContext(), false);
+
+    retVal = buffer->getMemObjectInfo(
+        CL_MEM_USES_COMPRESSION_INTEL,
+        sizeReturned,
+        &usesCompression,
+        nullptr);
+    EXPECT_EQ(CL_SUCCESS, retVal);
+    EXPECT_EQ(cl_bool{CL_FALSE}, usesCompression);
 }
 
 class GetMemObjectInfoLocalMemory : public GetMemObjectInfo {

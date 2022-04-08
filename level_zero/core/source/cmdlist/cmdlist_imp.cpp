@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019-2020 Intel Corporation
+ * Copyright (C) 2020-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -27,6 +27,10 @@ CommandListAllocatorFn commandListFactory[IGFX_MAX_PRODUCT] = {};
 CommandListAllocatorFn commandListFactoryImmediate[IGFX_MAX_PRODUCT] = {};
 
 ze_result_t CommandListImp::destroy() {
+    if (this->cmdListType == CommandListType::TYPE_IMMEDIATE && this->isFlushTaskSubmissionEnabled && !this->isSyncModeQueue) {
+        auto timeoutMicroseconds = NEO::TimeoutControls::maxTimeout;
+        this->csr->waitForCompletionWithTimeout(false, timeoutMicroseconds, this->csr->peekTaskCount());
+    }
     delete this;
     return ZE_RESULT_SUCCESS;
 }
@@ -35,54 +39,46 @@ ze_result_t CommandListImp::appendMetricMemoryBarrier() {
     return MetricQuery::appendMemoryBarrier(*this);
 }
 
-ze_result_t CommandListImp::appendMetricTracerMarker(zet_metric_tracer_handle_t hMetricTracer,
-                                                     uint32_t value) {
-    return MetricQuery::appendTracerMarker(*this, hMetricTracer, value);
+ze_result_t CommandListImp::appendMetricStreamerMarker(zet_metric_streamer_handle_t hMetricStreamer,
+                                                       uint32_t value) {
+    return MetricQuery::appendStreamerMarker(*this, hMetricStreamer, value);
 }
 
 ze_result_t CommandListImp::appendMetricQueryBegin(zet_metric_query_handle_t hMetricQuery) {
     return MetricQuery::fromHandle(hMetricQuery)->appendBegin(*this);
 }
 
-ze_result_t CommandListImp::appendMetricQueryEnd(zet_metric_query_handle_t hMetricQuery,
-                                                 ze_event_handle_t hCompletionEvent) {
-    return MetricQuery::fromHandle(hMetricQuery)->appendEnd(*this, hCompletionEvent);
+ze_result_t CommandListImp::appendMetricQueryEnd(zet_metric_query_handle_t hMetricQuery, ze_event_handle_t hSignalEvent,
+                                                 uint32_t numWaitEvents, ze_event_handle_t *phWaitEvents) {
+    return MetricQuery::fromHandle(hMetricQuery)->appendEnd(*this, hSignalEvent, numWaitEvents, phWaitEvents);
 }
 
-CommandList *CommandList::create(uint32_t productFamily, Device *device, bool isCopyOnly) {
+CommandList *CommandList::create(uint32_t productFamily, Device *device, NEO::EngineGroupType engineGroupType,
+                                 ze_command_list_flags_t flags, ze_result_t &returnValue) {
     CommandListAllocatorFn allocator = nullptr;
     if (productFamily < IGFX_MAX_PRODUCT) {
         allocator = commandListFactory[productFamily];
     }
 
     CommandListImp *commandList = nullptr;
+    returnValue = ZE_RESULT_ERROR_UNINITIALIZED;
+
     if (allocator) {
         commandList = static_cast<CommandListImp *>((*allocator)(CommandList::defaultNumIddsPerBlock));
-
-        commandList->initialize(device, isCopyOnly);
+        returnValue = commandList->initialize(device, engineGroupType, flags);
+        if (returnValue != ZE_RESULT_SUCCESS) {
+            commandList->destroy();
+            commandList = nullptr;
+        }
     }
+
     return commandList;
 }
 
 CommandList *CommandList::createImmediate(uint32_t productFamily, Device *device,
                                           const ze_command_queue_desc_t *desc,
-                                          bool internalUsage, bool isCopyOnly) {
-
-    auto deviceImp = static_cast<DeviceImp *>(device);
-    NEO::CommandStreamReceiver *csr = nullptr;
-    if (internalUsage) {
-        csr = deviceImp->neoDevice->getInternalEngine().commandStreamReceiver;
-    } else if (isCopyOnly) {
-        auto &selectorCopyEngine = deviceImp->neoDevice->getDeviceById(0)->getSelectorCopyEngine();
-        csr = deviceImp->neoDevice->getDeviceById(0)->getEngine(NEO::EngineHelpers::getBcsEngineType(deviceImp->neoDevice->getHardwareInfo(), selectorCopyEngine), false).commandStreamReceiver;
-    } else {
-        csr = deviceImp->neoDevice->getDefaultEngine().commandStreamReceiver;
-    }
-
-    auto commandQueue = CommandQueue::create(productFamily, device, csr, desc, isCopyOnly);
-    if (!commandQueue) {
-        return nullptr;
-    }
+                                          bool internalUsage, NEO::EngineGroupType engineGroupType,
+                                          ze_result_t &returnValue) {
 
     CommandListAllocatorFn allocator = nullptr;
     if (productFamily < IGFX_MAX_PRODUCT) {
@@ -90,21 +86,52 @@ CommandList *CommandList::createImmediate(uint32_t productFamily, Device *device
     }
 
     CommandListImp *commandList = nullptr;
+    returnValue = ZE_RESULT_ERROR_UNINITIALIZED;
+
+    NEO::EngineGroupType engineType = engineGroupType;
+
     if (allocator) {
+        NEO::CommandStreamReceiver *csr = nullptr;
+        auto deviceImp = static_cast<DeviceImp *>(device);
+        if (internalUsage) {
+            if (NEO::EngineGroupType::Copy == engineType && deviceImp->getActiveDevice()->getInternalCopyEngine()) {
+                csr = deviceImp->getActiveDevice()->getInternalCopyEngine()->commandStreamReceiver;
+            } else {
+                csr = deviceImp->getActiveDevice()->getInternalEngine().commandStreamReceiver;
+                engineType = NEO::EngineGroupType::RenderCompute;
+            }
+        } else {
+            returnValue = device->getCsrForOrdinalAndIndex(&csr, desc->ordinal, desc->index);
+            if (returnValue != ZE_RESULT_SUCCESS) {
+                return commandList;
+            }
+        }
+
+        UNRECOVERABLE_IF(nullptr == csr);
+
         commandList = static_cast<CommandListImp *>((*allocator)(CommandList::commandListimmediateIddsPerBlock));
+        commandList->internalUsage = internalUsage;
+        commandList->cmdListType = CommandListType::TYPE_IMMEDIATE;
+        commandList->isSyncModeQueue = (desc->mode == ZE_COMMAND_QUEUE_MODE_SYNCHRONOUS);
+        returnValue = commandList->initialize(device, engineType, desc->flags);
+        if (returnValue != ZE_RESULT_SUCCESS) {
+            commandList->destroy();
+            commandList = nullptr;
+            return commandList;
+        }
 
-        commandList->initialize(device, isCopyOnly);
+        auto commandQueue = CommandQueue::create(productFamily, device, csr, desc, NEO::EngineGroupType::Copy == engineType, internalUsage, returnValue);
+        if (!commandQueue) {
+            commandList->destroy();
+            commandList = nullptr;
+            return commandList;
+        }
+
+        commandList->cmdQImmediate = commandQueue;
+        commandList->csr = csr;
+        commandList->commandListPreemptionMode = device->getDevicePreemptionMode();
+        return commandList;
     }
-
-    if (!commandList) {
-        commandQueue->destroy();
-        return nullptr;
-    }
-
-    commandList->cmdQImmediate = commandQueue;
-    commandList->cmdListType = CommandListType::TYPE_IMMEDIATE;
-    commandList->cmdQImmediateDesc = desc;
-    commandList->commandListPreemptionMode = device->getDevicePreemptionMode();
 
     return commandList;
 }

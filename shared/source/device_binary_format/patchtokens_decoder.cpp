@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019-2020 Intel Corporation
+ * Copyright (C) 2019-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -33,12 +33,12 @@ struct PatchTokensStreamReader {
     }
 
     template <typename... ArgsT>
-    bool enoughDataLeft(ArgsT &&... args) {
+    bool enoughDataLeft(ArgsT &&...args) {
         return false == notEnoughDataLeft(std::forward<ArgsT>(args)...);
     }
 
     template <typename T, typename... ArgsT>
-    bool enoughDataLeft(ArgsT &&... args) {
+    bool enoughDataLeft(ArgsT &&...args) {
         return false == notEnoughDataLeft<T>(std::forward<ArgsT>(args)...);
     }
 
@@ -292,21 +292,13 @@ inline void decodeKernelDataParameterToken(const SPatchDataParameterBuffer *toke
         break;
 
     case DATA_PARAMETER_NUM_HARDWARE_THREADS:
-        CPP_ATTRIBUTE_FALLTHROUGH;
     case DATA_PARAMETER_PRINTF_SURFACE_SIZE:
-        CPP_ATTRIBUTE_FALLTHROUGH;
     case DATA_PARAMETER_IMAGE_SRGB_CHANNEL_ORDER:
-        CPP_ATTRIBUTE_FALLTHROUGH;
     case DATA_PARAMETER_STAGE_IN_GRID_ORIGIN:
-        CPP_ATTRIBUTE_FALLTHROUGH;
     case DATA_PARAMETER_STAGE_IN_GRID_SIZE:
-        CPP_ATTRIBUTE_FALLTHROUGH;
     case DATA_PARAMETER_LOCAL_ID:
-        CPP_ATTRIBUTE_FALLTHROUGH;
     case DATA_PARAMETER_EXECUTION_MASK:
-        CPP_ATTRIBUTE_FALLTHROUGH;
     case DATA_PARAMETER_VME_IMAGE_TYPE:
-        CPP_ATTRIBUTE_FALLTHROUGH;
     case DATA_PARAMETER_VME_MB_SKIP_BLOCK_TYPE:
         // ignored intentionally
         break;
@@ -316,7 +308,7 @@ inline void decodeKernelDataParameterToken(const SPatchDataParameterBuffer *toke
 inline bool decodeToken(const SPatchItemHeader *token, KernelFromPatchtokens &out) {
     switch (token->Token) {
     default: {
-        printDebugString(DebugManager.flags.PrintDebugMessages.get(), stderr, "Unknown kernel-scope Patch Token: %d\n", token->Token);
+        PRINT_DEBUG_STRING(DebugManager.flags.PrintDebugMessages.get(), stderr, "Unknown kernel-scope Patch Token: %d\n", token->Token);
         DEBUG_BREAK_IF(true);
         out.unhandledTokens.push_back(token);
         break;
@@ -399,15 +391,10 @@ inline bool decodeToken(const SPatchItemHeader *token, KernelFromPatchtokens &ou
         break;
 
     case PATCH_TOKEN_SAMPLER_KERNEL_ARGUMENT:
-        CPP_ATTRIBUTE_FALLTHROUGH;
     case PATCH_TOKEN_IMAGE_MEMORY_OBJECT_KERNEL_ARGUMENT:
-        CPP_ATTRIBUTE_FALLTHROUGH;
     case PATCH_TOKEN_GLOBAL_MEMORY_OBJECT_KERNEL_ARGUMENT:
-        CPP_ATTRIBUTE_FALLTHROUGH;
     case PATCH_TOKEN_STATELESS_GLOBAL_MEMORY_OBJECT_KERNEL_ARGUMENT:
-        CPP_ATTRIBUTE_FALLTHROUGH;
     case PATCH_TOKEN_STATELESS_CONSTANT_MEMORY_OBJECT_KERNEL_ARGUMENT:
-        CPP_ATTRIBUTE_FALLTHROUGH;
     case PATCH_TOKEN_STATELESS_DEVICE_QUEUE_KERNEL_ARGUMENT:
         assignArg(out, token);
         break;
@@ -432,7 +419,7 @@ inline bool decodeToken(const SPatchItemHeader *token, ProgramFromPatchtokens &o
     auto &progTok = out.programScopeTokens;
     switch (token->Token) {
     default: {
-        printDebugString(DebugManager.flags.PrintDebugMessages.get(), stderr, "Unknown program-scope Patch Token: %d\n", token->Token);
+        PRINT_DEBUG_STRING(DebugManager.flags.PrintDebugMessages.get(), stderr, "Unknown program-scope Patch Token: %d\n", token->Token);
         DEBUG_BREAK_IF(true);
         out.unhandledTokens.push_back(token);
         break;

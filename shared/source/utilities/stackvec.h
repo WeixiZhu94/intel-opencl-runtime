@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -32,6 +32,7 @@ template <typename DataType, size_t OnStackCapacity,
           typename StackSizeT = typename StackVecSize<OnStackCapacity>::SizeT>
 class StackVec {
   public:
+    using value_type = DataType; // NOLINT
     using SizeT = StackSizeT;
     using iterator = DataType *;
     using const_iterator = const DataType *;
@@ -89,6 +90,9 @@ class StackVec {
     }
 
     StackVec &operator=(const StackVec &rhs) {
+        if (this == &rhs) {
+            return *this;
+        }
         clear();
 
         if (usesDynamicMem()) {
@@ -125,6 +129,10 @@ class StackVec {
     }
 
     StackVec &operator=(StackVec &&rhs) {
+        if (this == &rhs) {
+            return *this;
+        }
+
         clear();
 
         if (rhs.usesDynamicMem()) {
@@ -205,6 +213,18 @@ class StackVec {
         ++onStackSize;
     }
 
+    void pop_back() { // NOLINT
+        if (usesDynamicMem()) {
+            dynamicMem->pop_back();
+            return;
+        }
+
+        UNRECOVERABLE_IF(0 == onStackSize);
+
+        clearStackObjects(onStackSize - 1, 1U);
+        --onStackSize;
+    }
+
     DataType &operator[](std::size_t idx) {
         if (usesDynamicMem()) {
             return (*dynamicMem)[idx];
@@ -279,11 +299,11 @@ class StackVec {
         return std::numeric_limits<decltype(onStackSize)>::max() == this->onStackSize;
     }
 
-    void *data() {
+    auto data() {
         if (usesDynamicMem()) {
             return dynamicMem->data();
         }
-        return onStackMemRawBytes;
+        return reinterpret_cast<DataType *>(onStackMemRawBytes);
     }
 
   private:

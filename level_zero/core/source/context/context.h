@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 Intel Corporation
+ * Copyright (C) 2020-2022 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -9,8 +9,7 @@
 
 #include "level_zero/core/source/driver/driver_handle.h"
 #include <level_zero/ze_api.h>
-
-#include "third_party/level_zero/ze_api_ext.h"
+#include <level_zero/zet_api.h>
 
 struct _ze_context_handle_t {
     virtual ~_ze_context_handle_t() = default;
@@ -20,25 +19,51 @@ namespace L0 {
 struct DriverHandle;
 
 struct Context : _ze_context_handle_t {
+    inline static ze_memory_type_t parseUSMType(InternalMemoryType memoryType) {
+        switch (memoryType) {
+        case InternalMemoryType::SHARED_UNIFIED_MEMORY:
+            return ZE_MEMORY_TYPE_SHARED;
+        case InternalMemoryType::DEVICE_UNIFIED_MEMORY:
+            return ZE_MEMORY_TYPE_DEVICE;
+        case InternalMemoryType::HOST_UNIFIED_MEMORY:
+            return ZE_MEMORY_TYPE_HOST;
+        default:
+            return ZE_MEMORY_TYPE_UNKNOWN;
+        }
+
+        return ZE_MEMORY_TYPE_UNKNOWN;
+    }
+
     virtual ~Context() = default;
     virtual ze_result_t destroy() = 0;
     virtual ze_result_t getStatus() = 0;
     virtual DriverHandle *getDriverHandle() = 0;
-    virtual ze_result_t allocHostMem(ze_host_mem_alloc_flag_t flags,
+    virtual ze_result_t allocHostMem(const ze_host_mem_alloc_desc_t *hostDesc,
                                      size_t size,
                                      size_t alignment,
                                      void **ptr) = 0;
     virtual ze_result_t allocDeviceMem(ze_device_handle_t hDevice,
-                                       ze_device_mem_alloc_flag_t flags,
+                                       const ze_device_mem_alloc_desc_t *deviceDesc,
                                        size_t size,
                                        size_t alignment, void **ptr) = 0;
     virtual ze_result_t allocSharedMem(ze_device_handle_t hDevice,
-                                       ze_device_mem_alloc_flag_t deviceFlags,
-                                       ze_host_mem_alloc_flag_t hostFlags,
+                                       const ze_device_mem_alloc_desc_t *deviceDesc,
+                                       const ze_host_mem_alloc_desc_t *hostDesc,
                                        size_t size,
                                        size_t alignment,
                                        void **ptr) = 0;
     virtual ze_result_t freeMem(const void *ptr) = 0;
+    virtual ze_result_t freeMem(const void *ptr, bool blocking) = 0;
+    virtual ze_result_t freeMemExt(const ze_memory_free_ext_desc_t *pMemFreeDesc,
+                                   void *ptr) = 0;
+    virtual ze_result_t makeMemoryResident(ze_device_handle_t hDevice,
+                                           void *ptr,
+                                           size_t size) = 0;
+    virtual ze_result_t evictMemory(ze_device_handle_t hDevice,
+                                    void *ptr,
+                                    size_t size) = 0;
+    virtual ze_result_t makeImageResident(ze_device_handle_t hDevice, ze_image_handle_t hImage) = 0;
+    virtual ze_result_t evictImage(ze_device_handle_t hDevice, ze_image_handle_t hImage) = 0;
     virtual ze_result_t getMemAddressRange(const void *ptr,
                                            void **pBase,
                                            size_t *pSize) = 0;
@@ -68,6 +93,46 @@ struct Context : _ze_context_handle_t {
     virtual ze_result_t createCommandListImmediate(ze_device_handle_t hDevice,
                                                    const ze_command_queue_desc_t *desc,
                                                    ze_command_list_handle_t *commandList) = 0;
+    virtual ze_result_t activateMetricGroups(zet_device_handle_t hDevice,
+                                             uint32_t count,
+                                             zet_metric_group_handle_t *phMetricGroups) = 0;
+    virtual ze_result_t reserveVirtualMem(const void *pStart,
+                                          size_t size,
+                                          void **pptr) = 0;
+    virtual ze_result_t freeVirtualMem(const void *ptr,
+                                       size_t size) = 0;
+    virtual ze_result_t queryVirtualMemPageSize(ze_device_handle_t hDevice,
+                                                size_t size,
+                                                size_t *pagesize) = 0;
+    virtual ze_result_t createPhysicalMem(ze_device_handle_t hDevice,
+                                          ze_physical_mem_desc_t *desc,
+                                          ze_physical_mem_handle_t *phPhysicalMemory) = 0;
+    virtual ze_result_t destroyPhysicalMem(ze_physical_mem_handle_t hPhysicalMemory) = 0;
+    virtual ze_result_t mapVirtualMem(const void *ptr,
+                                      size_t size,
+                                      ze_physical_mem_handle_t hPhysicalMemory,
+                                      size_t offset,
+                                      ze_memory_access_attribute_t access) = 0;
+    virtual ze_result_t unMapVirtualMem(const void *ptr,
+                                        size_t size) = 0;
+    virtual ze_result_t setVirtualMemAccessAttribute(const void *ptr,
+                                                     size_t size,
+                                                     ze_memory_access_attribute_t access) = 0;
+    virtual ze_result_t getVirtualMemAccessAttribute(const void *ptr,
+                                                     size_t size,
+                                                     ze_memory_access_attribute_t *access,
+                                                     size_t *outSize) = 0;
+    virtual ze_result_t openEventPoolIpcHandle(ze_ipc_event_pool_handle_t hIpc,
+                                               ze_event_pool_handle_t *phEventPool) = 0;
+    virtual ze_result_t createEventPool(const ze_event_pool_desc_t *desc,
+                                        uint32_t numDevices,
+                                        ze_device_handle_t *phDevices,
+                                        ze_event_pool_handle_t *phEventPool) = 0;
+    virtual ze_result_t createImage(ze_device_handle_t hDevice,
+                                    const ze_image_desc_t *desc,
+                                    ze_image_handle_t *phImage) = 0;
+    virtual bool isShareableMemory(const void *exportDesc, bool exportableMemory, NEO::Device *neoDevice) = 0;
+    virtual void *getMemHandlePtr(ze_device_handle_t hDevice, uint64_t handle, ze_ipc_memory_flags_t flags) = 0;
 
     static Context *fromHandle(ze_context_handle_t handle) { return static_cast<Context *>(handle); }
     inline ze_context_handle_t toHandle() { return this; }

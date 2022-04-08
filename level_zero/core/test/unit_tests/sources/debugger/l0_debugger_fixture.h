@@ -1,12 +1,15 @@
 /*
- * Copyright (C) 2020 Intel Corporation
+ * Copyright (C) 2020-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
  */
 
-#include "shared/test/unit_test/helpers/debug_manager_state_restore.h"
-#include "shared/test/unit_test/mocks/mock_device.h"
+#include "shared/test/common/helpers/debug_manager_state_restore.h"
+#include "shared/test/common/mocks/mock_compilers.h"
+#include "shared/test/common/mocks/mock_device.h"
+#include "shared/test/common/mocks/mock_memory_operations_handler.h"
+#include "shared/test/common/mocks/mock_sip.h"
 
 #include "level_zero/core/test/unit_tests/fixtures/device_fixture.h"
 #include "level_zero/core/test/unit_tests/mocks/mock_built_ins.h"
@@ -17,11 +20,24 @@ namespace ult {
 
 struct L0DebuggerFixture {
     void SetUp() {
+        NEO::MockCompilerEnableGuard mock(true);
         auto executionEnvironment = new NEO::ExecutionEnvironment();
         auto mockBuiltIns = new MockBuiltins();
         executionEnvironment->prepareRootDeviceEnvironments(1);
         executionEnvironment->rootDeviceEnvironments[0]->builtins.reset(mockBuiltIns);
-        executionEnvironment->rootDeviceEnvironments[0]->setHwInfo(defaultHwInfo.get());
+        memoryOperationsHandler = new NEO::MockMemoryOperations();
+        executionEnvironment->rootDeviceEnvironments[0]->memoryOperationsInterface.reset(memoryOperationsHandler);
+        executionEnvironment->setDebuggingEnabled();
+
+        hwInfo = *NEO::defaultHwInfo.get();
+        hwInfo.featureTable.flags.ftrLocalMemory = true;
+
+        auto isHexadecimalArrayPrefered = HwHelper::get(hwInfo.platform.eRenderCoreFamily).isSipKernelAsHexadecimalArrayPreferred();
+        if (isHexadecimalArrayPrefered) {
+            MockSipData::useMockSip = true;
+        }
+
+        executionEnvironment->rootDeviceEnvironments[0]->setHwInfo(&hwInfo);
         executionEnvironment->initializeMemoryManager();
 
         neoDevice = NEO::MockDevice::create<NEO::MockDevice>(executionEnvironment, 0u);
@@ -41,27 +57,29 @@ struct L0DebuggerFixture {
     std::unique_ptr<Mock<L0::DriverHandleImp>> driverHandle;
     NEO::MockDevice *neoDevice = nullptr;
     L0::Device *device = nullptr;
+    NEO::HardwareInfo hwInfo;
+    MockMemoryOperations *memoryOperationsHandler = nullptr;
+    VariableBackup<bool> mockSipCalled{&NEO::MockSipData::called};
+    VariableBackup<NEO::SipKernelType> mockSipCalledType{&NEO::MockSipData::calledType};
+    VariableBackup<bool> backupSipInitType{&MockSipData::useMockSip};
 };
 
-struct MockL0DebuggerFixture : public L0DebuggerFixture {
+struct L0DebuggerHwFixture : public L0DebuggerFixture {
     void SetUp() {
         L0DebuggerFixture::SetUp();
-        neoDevice->getExecutionEnvironment()->rootDeviceEnvironments[neoDevice->getRootDeviceIndex()]->debugger.reset(new MockDebuggerL0(neoDevice));
-        neoDevice->setDebuggerActive(true);
+        debuggerHw = static_cast<DebuggerL0 *>(neoDevice->getExecutionEnvironment()->rootDeviceEnvironments[neoDevice->getRootDeviceIndex()]->debugger.get());
         neoDevice->setPreemptionMode(PreemptionMode::Disabled);
-        auto debugSurface = neoDevice->getMemoryManager()->allocateGraphicsMemoryWithProperties(
-            {device->getRootDeviceIndex(), true,
-             NEO::SipKernel::maxDbgSurfaceSize,
-             NEO::GraphicsAllocation::AllocationType::DEBUG_CONTEXT_SAVE_AREA,
-             false,
-             false,
-             device->getNEODevice()->getDeviceBitfield()});
-        static_cast<L0::DeviceImp *>(device)->setDebugSurface(debugSurface);
     }
 
     void TearDown() {
         L0DebuggerFixture::TearDown();
+        debuggerHw = nullptr;
     }
+    template <typename GfxFamily>
+    MockDebuggerL0Hw<GfxFamily> *getMockDebuggerL0Hw() {
+        return static_cast<MockDebuggerL0Hw<GfxFamily> *>(debuggerHw);
+    }
+    DebuggerL0 *debuggerHw = nullptr;
 };
 
 } // namespace ult

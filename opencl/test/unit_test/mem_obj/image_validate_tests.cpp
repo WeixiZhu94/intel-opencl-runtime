@@ -1,11 +1,12 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
  */
 
 #include "shared/source/helpers/aligned_memory.h"
+#include "shared/test/common/mocks/mock_graphics_allocation.h"
 
 #include "opencl/source/cl_device/cl_device.h"
 #include "opencl/source/helpers/convert_color.h"
@@ -13,7 +14,6 @@
 #include "opencl/source/mem_obj/image.h"
 #include "opencl/test/unit_test/fixtures/image_fixture.h"
 #include "opencl/test/unit_test/mocks/mock_context.h"
-#include "opencl/test/unit_test/mocks/mock_graphics_allocation.h"
 #include "opencl/test/unit_test/test_macros/test_checks_ocl.h"
 
 #include "gtest/gtest.h"
@@ -763,17 +763,17 @@ struct NullImage : public Image {
     using Image::imageDesc;
     using Image::imageFormat;
 
-    NullImage() : Image(nullptr, MemoryProperties(), cl_mem_flags{}, 0, 0, nullptr, cl_image_format{},
+    NullImage() : Image(nullptr, MemoryProperties(), cl_mem_flags{}, 0, 0, nullptr, nullptr, cl_image_format{},
                         cl_image_desc{}, false, GraphicsAllocationHelper::toMultiGraphicsAllocation(new MockGraphicsAllocation(nullptr, 0)), false,
                         0, 0, ClSurfaceFormatInfo{}, nullptr) {
     }
     ~NullImage() override {
         delete this->multiGraphicsAllocation.getGraphicsAllocation(0);
     }
-    void setImageArg(void *memory, bool isMediaBlockImage, uint32_t mipLevel, uint32_t rootDeviceIndex) override {}
+    void setImageArg(void *memory, bool isMediaBlockImage, uint32_t mipLevel, uint32_t rootDeviceIndex, bool useGlobalAtomics) override {}
     void setMediaImageArg(void *memory, uint32_t rootDeviceIndex) override {}
     void setMediaSurfaceRotation(void *memory) override {}
-    void setSurfaceMemoryObjectControlStateIndexToMocsTable(void *memory, uint32_t value) override {}
+    void setSurfaceMemoryObjectControlState(void *memory, uint32_t value) override {}
     void transformImage2dArrayTo3d(void *memory) override {}
     void transformImage3dTo2dArray(void *memory) override {}
 };

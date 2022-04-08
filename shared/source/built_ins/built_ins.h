@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -27,14 +27,9 @@
 namespace NEO {
 typedef std::vector<char> BuiltinResourceT;
 
-class Context;
 class Device;
-class Kernel;
-struct KernelInfo;
-struct MultiDispatchInfo;
-class Program;
-class SchedulerKernel;
 class SipKernel;
+class MemoryManager;
 
 static constexpr ConstStringRef mediaKernelsBuildOptionsList[] = {
     "-D cl_intel_device_side_advanced_vme_enable",
@@ -140,8 +135,6 @@ class BuiltinsLib {
     BuiltinsLib();
     BuiltinCode getBuiltinCode(EBuiltInOps::Type builtin, BuiltinCode::ECodeType requestedCodeType, Device &device);
 
-    static std::unique_ptr<Program> createProgramFromCode(const BuiltinCode &bc, Device &device);
-
   protected:
     BuiltinResourceT getBuiltinResource(EBuiltInOps::Type builtin, BuiltinCode::ECodeType requestedCodeType, Device &device);
 
@@ -151,25 +144,13 @@ class BuiltinsLib {
     std::mutex mutex;
 };
 
-struct BuiltInKernel {
-    const char *pSource = nullptr;
-    Program *pProgram = nullptr;
-    std::once_flag programIsInitialized; // guard for creating+building the program
-    Kernel *pKernel = nullptr;
-
-    BuiltInKernel() {
-    }
-};
-
-class BuiltinDispatchInfoBuilder;
-
 class BuiltIns {
   public:
-    std::pair<std::unique_ptr<BuiltinDispatchInfoBuilder>, std::once_flag> BuiltinOpsBuilders[static_cast<uint32_t>(EBuiltInOps::COUNT)];
     BuiltIns();
     virtual ~BuiltIns();
 
     MOCKABLE_VIRTUAL const SipKernel &getSipKernel(SipKernelType type, Device &device);
+    MOCKABLE_VIRTUAL void freeSipKernels(MemoryManager *memoryManager);
 
     BuiltinsLib &getBuiltinsLib() {
         DEBUG_BREAK_IF(!builtinsLib.get());
@@ -190,8 +171,6 @@ class BuiltIns {
 
     std::unique_ptr<BuiltinsLib> builtinsLib;
 
-    using ProgramsContainerT = std::array<std::pair<std::unique_ptr<Program>, std::once_flag>, static_cast<size_t>(EBuiltInOps::COUNT)>;
-    ProgramsContainerT builtinPrograms;
     bool enableCacheing = true;
 };
 

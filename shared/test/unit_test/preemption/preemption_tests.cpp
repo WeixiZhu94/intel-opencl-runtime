@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -7,19 +7,14 @@
 
 #include "shared/source/command_stream/preemption.h"
 #include "shared/source/helpers/hw_helper.h"
-#include "shared/test/unit_test/cmd_parse/hw_parse.h"
-#include "shared/test/unit_test/fixtures/preemption_fixture.h"
-#include "shared/test/unit_test/helpers/debug_manager_state_restore.h"
-#include "shared/test/unit_test/helpers/dispatch_flags_helper.h"
-#include "shared/test/unit_test/mocks/mock_device.h"
-
-#include "opencl/source/command_queue/command_queue_hw.h"
-#include "opencl/source/helpers/dispatch_info.h"
-#include "opencl/test/unit_test/libult/ult_command_stream_receiver.h"
-#include "opencl/test/unit_test/mocks/mock_builtins.h"
-#include "opencl/test/unit_test/mocks/mock_graphics_allocation.h"
-#include "opencl/test/unit_test/mocks/mock_kernel.h"
-#include "opencl/test/unit_test/mocks/mock_platform.h"
+#include "shared/test/common/cmd_parse/hw_parse.h"
+#include "shared/test/common/fixtures/preemption_fixture.h"
+#include "shared/test/common/helpers/debug_manager_state_restore.h"
+#include "shared/test/common/helpers/dispatch_flags_helper.h"
+#include "shared/test/common/libult/ult_command_stream_receiver.h"
+#include "shared/test/common/mocks/mock_builtins.h"
+#include "shared/test/common/mocks/mock_device.h"
+#include "shared/test/common/mocks/mock_graphics_allocation.h"
 
 #include "gmock/gmock.h"
 
@@ -113,7 +108,6 @@ HWTEST_P(PreemptionHwTest, GivenPreemptionModeIsNotChangingWhenGettingRequiredCm
     {
         auto builtIns = new MockBuiltins();
 
-        builtIns->overrideSipKernel(std::unique_ptr<NEO::SipKernel>(new NEO::SipKernel{SipKernelType::Csr, GlobalMockSipProgram::getSipProgramWithCustomBinary()}));
         mockDevice->getExecutionEnvironment()->rootDeviceEnvironments[0]->builtins.reset(builtIns);
         PreemptionHelper::programCmdStream<FamilyType>(cmdStream, mode, mode, nullptr);
     }
@@ -200,7 +194,7 @@ HWTEST_P(PreemptionTest, whenInNonMidThreadModeThenSizeForStateSipIsZero) {
     auto mockDevice = std::unique_ptr<MockDevice>(MockDevice::createWithNewExecutionEnvironment<MockDevice>(nullptr));
     mockDevice->setPreemptionMode(mode);
 
-    auto size = PreemptionHelper::getRequiredStateSipCmdSize<FamilyType>(*mockDevice);
+    auto size = PreemptionHelper::getRequiredStateSipCmdSize<FamilyType>(*mockDevice, false);
     EXPECT_EQ(0u, size);
 }
 
@@ -209,7 +203,7 @@ HWTEST_P(PreemptionTest, whenInNonMidThreadModeThenStateSipIsNotProgrammed) {
     auto mockDevice = std::unique_ptr<MockDevice>(MockDevice::createWithNewExecutionEnvironment<MockDevice>(nullptr));
     mockDevice->setPreemptionMode(mode);
 
-    auto requiredSize = PreemptionHelper::getRequiredStateSipCmdSize<FamilyType>(*mockDevice);
+    auto requiredSize = PreemptionHelper::getRequiredStateSipCmdSize<FamilyType>(*mockDevice, false);
     StackVec<char, 4096> buffer(requiredSize);
     LinearStream cmdStream(buffer.begin(), buffer.size());
 
@@ -239,37 +233,6 @@ HWTEST_P(PreemptionTest, whenInNonMidThreadModeThenCsrBaseAddressIsNotProgrammed
     EXPECT_EQ(0u, cmdStream.getUsed());
 }
 
-HWTEST_P(PreemptionTest, whenFailToCreatePreemptionAllocationThenFailToCreateDevice) {
-
-    class MockUltCsr : public UltCommandStreamReceiver<FamilyType> {
-
-      public:
-        MockUltCsr(ExecutionEnvironment &executionEnvironment) : UltCommandStreamReceiver<FamilyType>(executionEnvironment, 0) {
-        }
-
-        bool createPreemptionAllocation() override {
-            return false;
-        }
-    };
-
-    class MockDeviceReturnedDebuggerActive : public MockDevice {
-      public:
-        MockDeviceReturnedDebuggerActive(ExecutionEnvironment *executionEnvironment, uint32_t deviceIndex)
-            : MockDevice(executionEnvironment, deviceIndex) {}
-        bool isDebuggerActive() const override {
-            return true;
-        }
-        std::unique_ptr<CommandStreamReceiver> createCommandStreamReceiver() const override {
-            return std::make_unique<MockUltCsr>(*executionEnvironment);
-        }
-    };
-
-    ExecutionEnvironment *executionEnvironment = platform()->peekExecutionEnvironment();
-
-    std::unique_ptr<MockDevice> mockDevice(MockDevice::create<MockDeviceReturnedDebuggerActive>(executionEnvironment, 0));
-    EXPECT_EQ(nullptr, mockDevice);
-}
-
 INSTANTIATE_TEST_CASE_P(
     NonMidThread,
     PreemptionTest,
@@ -277,7 +240,7 @@ INSTANTIATE_TEST_CASE_P(
 
 HWTEST_F(MidThreadPreemptionTests, GivenNoWaWhenCreatingCsrSurfaceThenSurfaceIsCorrect) {
     HardwareInfo hwInfo = *defaultHwInfo;
-    hwInfo.workaroundTable.waCSRUncachable = false;
+    hwInfo.workaroundTable.flags.waCSRUncachable = false;
 
     std::unique_ptr<MockDevice> mockDevice(MockDevice::createWithNewExecutionEnvironment<MockDevice>(&hwInfo));
     ASSERT_NE(nullptr, mockDevice.get());
@@ -307,16 +270,19 @@ HWTEST_F(MidThreadPreemptionTests, givenMidThreadPreemptionWhenFailingOnCsrSurfa
 
         uint32_t allocateGraphicsMemoryCount = 0;
     };
-    ExecutionEnvironment *executionEnvironment = platform()->peekExecutionEnvironment();
+    ExecutionEnvironment *executionEnvironment = MockDevice::prepareExecutionEnvironment(nullptr, 0u);
     executionEnvironment->memoryManager = std::make_unique<FailingMemoryManager>(*executionEnvironment);
+    if (executionEnvironment->memoryManager.get()->isLimitedGPU(0)) {
+        GTEST_SKIP();
+    }
 
     std::unique_ptr<MockDevice> mockDevice(MockDevice::create<MockDevice>(executionEnvironment, 0));
     EXPECT_EQ(nullptr, mockDevice.get());
 }
 
-HWTEST_F(MidThreadPreemptionTests, GivenWaWhenCreatingCsrSurfaceThenSurfaceIsCorrect) {
+HWTEST2_F(MidThreadPreemptionTests, GivenWaWhenCreatingCsrSurfaceThenSurfaceIsCorrect, IsAtMostGen12lp) {
     HardwareInfo hwInfo = *defaultHwInfo;
-    hwInfo.workaroundTable.waCSRUncachable = true;
+    hwInfo.workaroundTable.flags.waCSRUncachable = true;
 
     std::unique_ptr<MockDevice> mockDevice(MockDevice::createWithNewExecutionEnvironment<MockDevice>(&hwInfo));
     ASSERT_NE(nullptr, mockDevice.get());
@@ -328,6 +294,11 @@ HWTEST_F(MidThreadPreemptionTests, GivenWaWhenCreatingCsrSurfaceThenSurfaceIsCor
 
     GraphicsAllocation *devCsrSurface = csr.getPreemptionAllocation();
     EXPECT_EQ(csrSurface, devCsrSurface);
+
+    constexpr size_t expectedMask = (256 * MemoryConstants::kiloByte) - 1;
+
+    size_t addressValue = reinterpret_cast<size_t>(devCsrSurface->getUnderlyingBuffer());
+    EXPECT_EQ(0u, expectedMask & addressValue);
 }
 
 HWCMDTEST_F(IGFX_GEN8_CORE, MidThreadPreemptionTests, givenDirtyCsrStateWhenStateBaseAddressIsProgrammedThenStateSipIsAdded) {
@@ -342,7 +313,7 @@ HWCMDTEST_F(IGFX_GEN8_CORE, MidThreadPreemptionTests, givenDirtyCsrStateWhenStat
         auto &csr = mockDevice->getUltCommandStreamReceiver<FamilyType>();
         csr.isPreambleSent = true;
 
-        auto requiredSize = PreemptionHelper::getRequiredStateSipCmdSize<FamilyType>(*mockDevice);
+        auto requiredSize = PreemptionHelper::getRequiredStateSipCmdSize<FamilyType>(*mockDevice, false);
         StackVec<char, 4096> buff(requiredSize);
         LinearStream commandStream(buff.begin(), buff.size());
 
@@ -372,13 +343,16 @@ HWCMDTEST_F(IGFX_GEN8_CORE, MidThreadPreemptionTests, givenDirtyCsrStateWhenStat
         EXPECT_NE(hwParser.cmdList.end(), stateSipItor);
 
         auto stateSipAfterSBA = ++stateBaseAddressItor;
+        while ((stateSipAfterSBA != hwParser.cmdList.end()) && (*stateSipAfterSBA != *stateSipItor)) {
+            stateSipAfterSBA = ++stateBaseAddressItor;
+        }
         EXPECT_EQ(*stateSipAfterSBA, *stateSipItor);
 
         alignedFree(buffer);
     }
 }
 
-HWCMDTEST_F(IGFX_GEN8_CORE, MidThreadPreemptionTests, givenPreemptionProgrammedAfterVFEStateProgrammedInFlushedCmdBuffer) {
+HWCMDTEST_F(IGFX_GEN8_CORE, MidThreadPreemptionTests, WhenProgrammingPreemptionThenPreemptionProgrammedAfterVfeStateInCmdBuffer) {
     using MEDIA_VFE_STATE = typename FamilyType::MEDIA_VFE_STATE;
 
     auto mockDevice = std::unique_ptr<MockDevice>(MockDevice::createWithNewExecutionEnvironment<MockDevice>(nullptr));
@@ -389,7 +363,7 @@ HWCMDTEST_F(IGFX_GEN8_CORE, MidThreadPreemptionTests, givenPreemptionProgrammedA
         auto &csr = mockDevice->getUltCommandStreamReceiver<FamilyType>();
         csr.isPreambleSent = true;
 
-        auto requiredSize = PreemptionHelper::getRequiredStateSipCmdSize<FamilyType>(*mockDevice);
+        auto requiredSize = PreemptionHelper::getRequiredStateSipCmdSize<FamilyType>(*mockDevice, false);
         StackVec<char, 4096> buff(requiredSize);
         LinearStream commandStream(buff.begin(), buff.size());
 

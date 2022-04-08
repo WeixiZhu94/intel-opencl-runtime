@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -12,8 +12,8 @@
 
 #include "opencl/source/cl_device/cl_device.h"
 #include "opencl/source/context/context.h"
+#include "opencl/source/helpers/cl_memory_properties_helpers.h"
 #include "opencl/source/helpers/get_info_status_mapper.h"
-#include "opencl/source/helpers/memory_properties_helpers.h"
 #include "opencl/source/mem_obj/mem_obj_helper.h"
 
 namespace NEO {
@@ -27,7 +27,7 @@ Pipe::Pipe(Context *context,
            MultiGraphicsAllocation multiGraphicsAllocation)
     : MemObj(context,
              CL_MEM_OBJECT_PIPE,
-             MemoryPropertiesHelper::createMemoryProperties(flags, 0, 0, &context->getDevice(0)->getDevice()),
+             ClMemoryPropertiesHelper::createMemoryProperties(flags, 0, 0, &context->getDevice(0)->getDevice()),
              flags,
              0,
              static_cast<size_t>(packetSize * (maxPackets + 1) + intelPipeHeaderReservedSpace),
@@ -55,7 +55,7 @@ Pipe *Pipe::create(Context *context,
     DEBUG_BREAK_IF(!memoryManager);
 
     MemoryProperties memoryProperties =
-        MemoryPropertiesHelper::createMemoryProperties(flags, 0, 0, &context->getDevice(0)->getDevice());
+        ClMemoryPropertiesHelper::createMemoryProperties(flags, 0, 0, &context->getDevice(0)->getDevice());
     while (true) {
         auto size = static_cast<size_t>(packetSize * (maxPackets + 1) + intelPipeHeaderReservedSpace);
         auto rootDeviceIndex = context->getDevice(0)->getRootDeviceIndex();
@@ -64,7 +64,8 @@ Pipe *Pipe::create(Context *context,
                                                             true, // allocateMemory
                                                             size, GraphicsAllocation::AllocationType::PIPE,
                                                             false, // isMultiStorageAllocation
-                                                            context->getDevice(0)->getHardwareInfo(), context->getDeviceBitfieldForAllocation());
+                                                            context->getDevice(0)->getHardwareInfo(), context->getDeviceBitfieldForAllocation(rootDeviceIndex),
+                                                            context->isSingleDeviceContext());
         GraphicsAllocation *memory = memoryManager->allocateGraphicsMemoryWithProperties(allocProperties);
         if (!memory) {
             errcodeRet = CL_OUT_OF_HOST_MEMORY;

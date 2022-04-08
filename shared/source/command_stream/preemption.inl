@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -9,9 +9,9 @@
 #include "shared/source/command_stream/preemption.h"
 #include "shared/source/device/device.h"
 #include "shared/source/helpers/hw_helper.h"
+#include "shared/source/helpers/pipe_control_args.h"
+#include "shared/source/helpers/preamble.h"
 #include "shared/source/memory_manager/graphics_allocation.h"
-
-#include "opencl/source/command_queue/gpgpu_walker.h"
 
 namespace NEO {
 
@@ -32,11 +32,11 @@ void PreemptionHelper::programCsrBaseAddress(LinearStream &preambleCmdStream, De
 template <typename GfxFamily>
 void PreemptionHelper::programStateSip(LinearStream &preambleCmdStream, Device &device) {
     using STATE_SIP = typename GfxFamily::STATE_SIP;
-    bool debuggerActive = device.isDebuggerActive();
+    bool debuggingEnabled = device.getDebugger() != nullptr || device.isDebuggerActive();
     bool isMidThreadPreemption = device.getPreemptionMode() == PreemptionMode::MidThread;
 
-    if (isMidThreadPreemption || debuggerActive) {
-        auto sipAllocation = SipKernel::getSipKernelAllocation(device);
+    if (isMidThreadPreemption || debuggingEnabled) {
+        auto sipAllocation = SipKernel::getSipKernel(device).getSipAllocation();
 
         auto sip = reinterpret_cast<STATE_SIP *>(preambleCmdStream.getSpace(sizeof(STATE_SIP)));
         STATE_SIP cmd = GfxFamily::cmdInitStateSip;
@@ -44,6 +44,9 @@ void PreemptionHelper::programStateSip(LinearStream &preambleCmdStream, Device &
         *sip = cmd;
     }
 }
+
+template <typename GfxFamily>
+void PreemptionHelper::programStateSipEndWa(LinearStream &cmdStream, Device &device) {}
 
 template <typename GfxFamily>
 void PreemptionHelper::programCmdStream(LinearStream &cmdStream, PreemptionMode newPreemptionMode,
@@ -81,11 +84,12 @@ size_t PreemptionHelper::getRequiredPreambleSize(const Device &device) {
 }
 
 template <typename GfxFamily>
-size_t PreemptionHelper::getRequiredStateSipCmdSize(const Device &device) {
+size_t PreemptionHelper::getRequiredStateSipCmdSize(Device &device, bool isRcs) {
     size_t size = 0;
     bool isMidThreadPreemption = device.getPreemptionMode() == PreemptionMode::MidThread;
+    bool debuggingEnabled = device.getDebugger() != nullptr || device.isDebuggerActive();
 
-    if (isMidThreadPreemption || device.isDebuggerActive()) {
+    if (isMidThreadPreemption || debuggingEnabled) {
         size += sizeof(typename GfxFamily::STATE_SIP);
     }
     return size;

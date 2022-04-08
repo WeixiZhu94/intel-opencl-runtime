@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019-2020 Intel Corporation
+ * Copyright (C) 2020-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -9,7 +9,7 @@
 
 namespace NEO {
 
-std::unique_ptr<DrmMemoryOperationsHandler> DrmMemoryOperationsHandler::create() {
+std::unique_ptr<DrmMemoryOperationsHandler> DrmMemoryOperationsHandler::create(Drm &drm, uint32_t rootDeviceIndex) {
     return std::make_unique<DrmMemoryOperationsHandlerDefault>();
 }
 

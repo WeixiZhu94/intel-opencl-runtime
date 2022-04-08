@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 Intel Corporation
+ * Copyright (C) 2020-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -7,8 +7,7 @@
 
 #include "shared/source/kernel/kernel_arg_descriptor.h"
 #include "shared/source/kernel/kernel_descriptor.h"
-
-#include "test.h"
+#include "shared/test/common/test_macros/test.h"
 
 TEST(KernelDescriptor, WhenDefaultInitializedThenValuesAreCleared) {
     NEO::KernelDescriptor desc;
@@ -16,7 +15,7 @@ TEST(KernelDescriptor, WhenDefaultInitializedThenValuesAreCleared) {
     EXPECT_EQ(0U, desc.kernelAttributes.slmInlineSize);
     EXPECT_EQ(0U, desc.kernelAttributes.perThreadScratchSize[0]);
     EXPECT_EQ(0U, desc.kernelAttributes.perThreadScratchSize[1]);
-    EXPECT_EQ(0U, desc.kernelAttributes.perThreadPrivateMemorySize);
+    EXPECT_EQ(0U, desc.kernelAttributes.perHwThreadPrivateMemorySize);
     EXPECT_EQ(0U, desc.kernelAttributes.perThreadSystemThreadSurfaceSize);
     EXPECT_EQ(0U, desc.kernelAttributes.requiredWorkgroupSize[0]);
     EXPECT_EQ(0U, desc.kernelAttributes.requiredWorkgroupSize[1]);
@@ -36,7 +35,7 @@ TEST(KernelDescriptor, WhenDefaultInitializedThenValuesAreCleared) {
     EXPECT_EQ(2U, desc.kernelAttributes.workgroupDimensionsOrder[2]);
     EXPECT_EQ(0U, desc.kernelAttributes.gpuPointerSize);
     EXPECT_EQ(8U, desc.kernelAttributes.simdSize);
-    EXPECT_EQ(3U, desc.kernelAttributes.numLocalIdChannels);
+    EXPECT_EQ(0U, desc.kernelAttributes.numLocalIdChannels);
 
     EXPECT_EQ(0U, desc.entryPoints.skipPerThreadDataLoad);
     EXPECT_EQ(0U, desc.entryPoints.skipSetFFIDGP);
@@ -98,7 +97,7 @@ TEST(KernelDescriptorAttributesSupportsBuffersBiggerThan4Gb, GivenPureStatelessB
     EXPECT_TRUE(desc.kernelAttributes.supportsBuffersBiggerThan4Gb());
 }
 
-TEST(KernelDescriptorAttributesSupportsBuffersBiggerThan4Gb, GiveStatefulBufferAddressingThenReturnFalse) {
+TEST(KernelDescriptorAttributesSupportsBuffersBiggerThan4Gb, GivenStatefulBufferAddressingThenReturnFalse) {
     NEO::KernelDescriptor desc;
     desc.kernelAttributes.bufferAddressingMode = NEO::KernelDescriptor::Bindful;
     EXPECT_FALSE(desc.kernelAttributes.supportsBuffersBiggerThan4Gb());

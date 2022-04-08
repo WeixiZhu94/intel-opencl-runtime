@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -9,9 +9,8 @@
 
 #include "shared/source/helpers/constants.h"
 #include "shared/source/indirect_heap/indirect_heap.h"
-#include "shared/test/unit_test/cmd_parse/gen_cmd_parse.h"
-
-#include "opencl/test/unit_test/helpers/unit_test_helper.h"
+#include "shared/test/common/cmd_parse/gen_cmd_parse.h"
+#include "shared/test/common/helpers/unit_test_helper.h"
 
 #include "gtest/gtest.h"
 
@@ -19,7 +18,9 @@
 
 namespace NEO {
 template <typename FamilyType>
-void validateStateBaseAddress(uint64_t internalHeapBase, IndirectHeap *pDSH,
+void validateStateBaseAddress(uint64_t indirectObjectHeapBase,
+                              uint64_t instructionHeapBaseAddress,
+                              IndirectHeap *pDSH,
                               IndirectHeap *pIOH,
                               IndirectHeap *pSSH,
                               GenCmdList::iterator &startCommand,
@@ -45,7 +46,7 @@ void validateStateBaseAddress(uint64_t internalHeapBase, IndirectHeap *pDSH,
     EXPECT_EQ(expectedGeneralStateHeapBaseAddress, cmd->getGeneralStateBaseAddress());
     EXPECT_EQ(pSSH->getGraphicsAllocation()->getGpuAddress(), cmd->getSurfaceStateBaseAddress());
     EXPECT_EQ(pIOH->getGraphicsAllocation()->getGpuBaseAddress(), cmd->getIndirectObjectBaseAddress());
-    EXPECT_EQ(internalHeapBase, cmd->getInstructionBaseAddress());
+    EXPECT_EQ(instructionHeapBaseAddress, cmd->getInstructionBaseAddress());
 
     // Verify all sizes are getting programmed
     EXPECT_TRUE(cmd->getDynamicStateBufferSizeModifyEnable());

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 Intel Corporation
+ * Copyright (C) 2020-2022 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -17,13 +17,16 @@ class DrmMemoryOperationsHandlerDefault : public DrmMemoryOperationsHandler {
     DrmMemoryOperationsHandlerDefault();
     ~DrmMemoryOperationsHandlerDefault() override;
 
+    MemoryOperationsStatus makeResidentWithinOsContext(OsContext *osContext, ArrayRef<GraphicsAllocation *> gfxAllocations, bool evictable) override;
     MemoryOperationsStatus makeResident(Device *device, ArrayRef<GraphicsAllocation *> gfxAllocations) override;
     MemoryOperationsStatus isResident(Device *device, GraphicsAllocation &gfxAllocation) override;
     MemoryOperationsStatus evictWithinOsContext(OsContext *osContext, GraphicsAllocation &gfxAllocation) override;
     MemoryOperationsStatus evict(Device *device, GraphicsAllocation &gfxAllocation) override;
 
-    void mergeWithResidencyContainer(OsContext *osContext, ResidencyContainer &residencyContainer) override;
-    std::unique_lock<std::mutex> lockHandlerForExecWA() override;
+    MemoryOperationsStatus mergeWithResidencyContainer(OsContext *osContext, ResidencyContainer &residencyContainer) override;
+    std::unique_lock<std::mutex> lockHandlerIfUsed() override;
+
+    void evictUnusedAllocations(bool waitForCompletion, bool isLockNeeded) override;
 
   protected:
     std::unordered_set<GraphicsAllocation *> residency;

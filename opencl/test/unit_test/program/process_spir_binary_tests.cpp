@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -8,6 +8,7 @@
 #include "shared/source/device/device.h"
 #include "shared/source/helpers/string.h"
 
+#include "opencl/test/unit_test/mocks/mock_cl_device.h"
 #include "opencl/test/unit_test/mocks/mock_program.h"
 
 #include "gtest/gtest.h"
@@ -17,11 +18,11 @@ using namespace NEO;
 class ProcessSpirBinaryTests : public ::testing::Test {
   public:
     void SetUp() override {
-        executionEnvironment = std::make_unique<ExecutionEnvironment>();
-        program = std::make_unique<MockProgram>(*executionEnvironment);
+        device = std::make_unique<MockClDevice>(new MockDevice());
+        program = std::make_unique<MockProgram>(toClDeviceVector(*device));
     }
 
-    std::unique_ptr<ExecutionEnvironment> executionEnvironment;
+    std::unique_ptr<ClDevice> device;
     std::unique_ptr<MockProgram> program;
 };
 
@@ -51,8 +52,8 @@ TEST_F(ProcessSpirBinaryTests, WhenProcessingSpirBinaryThenIrBinaryIsSetCorrectl
     EXPECT_EQ(binarySize, program->irBinarySize);
 
     // Verify no built log is available
-    auto pBuildLog = program->getBuildLog(program->getDevicePtr());
-    EXPECT_EQ(nullptr, pBuildLog);
+    std::string buildLog = program->getBuildLog(0);
+    EXPECT_TRUE(buildLog.empty());
 }
 
 TEST_F(ProcessSpirBinaryTests, WhenProcessingSpirBinaryThenIsSpirvIsSetBasedonPassedValue) {

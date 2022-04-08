@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2020-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -32,7 +32,8 @@ enum ELF_IDENTIFIER_DATA : uint8_t {
 
 // Target machine
 enum ELF_MACHINE : uint16_t {
-    EM_NONE = 0, // No specific instrution set
+    EM_NONE = 0, // No specific instruction set
+    EM_INTELGT = 205,
 };
 
 // Elf version
@@ -122,6 +123,18 @@ enum PROGRAM_HEADER_FLAGS : uint32_t {
     PF_MASKOS = 0x0ff00000,  // operating-system-specific flags
     PF_MASKPROC = 0xf0000000 // processor-specific flags
 
+};
+
+enum SYMBOL_TABLE_TYPE : uint32_t {
+    STT_NOTYPE = 0,
+    STT_OBJECT = 1,
+    STT_FUNC = 2,
+    STT_SECTION = 3
+};
+
+enum SYMBOL_TABLE_BIND : uint32_t {
+    STB_LOCAL = 0,
+    STB_GLOBAL = 1
 };
 
 constexpr const char elfMagic[4] = {0x7f, 'E', 'L', 'F'};
@@ -303,12 +316,107 @@ struct ElfFileHeader {
 static_assert(sizeof(ElfFileHeader<EI_CLASS_32>) == 0x34, "");
 static_assert(sizeof(ElfFileHeader<EI_CLASS_64>) == 0x40, "");
 
+struct ElfNoteSection {
+    uint32_t nameSize;
+    uint32_t descSize;
+    uint32_t type;
+};
+static_assert(sizeof(ElfNoteSection) == 0xC, "");
+
+template <int NumBits>
+struct ElfSymbolEntryTypes;
+
+template <>
+struct ElfSymbolEntryTypes<EI_CLASS_32> {
+    using Name = uint32_t;
+    using Info = uint8_t;
+    using Other = uint8_t;
+    using Shndx = uint16_t;
+    using Value = uint32_t;
+    using Size = uint32_t;
+};
+
+template <>
+struct ElfSymbolEntryTypes<EI_CLASS_64> {
+    using Name = uint32_t;
+    using Info = uint8_t;
+    using Other = uint8_t;
+    using Shndx = uint16_t;
+    using Value = uint64_t;
+    using Size = uint64_t;
+};
+
+template <ELF_IDENTIFIER_CLASS NumBits>
+struct ElfSymbolEntry;
+
+template <>
+struct ElfSymbolEntry<EI_CLASS_32> {
+    ElfSymbolEntryTypes<EI_CLASS_32>::Name name;
+    ElfSymbolEntryTypes<EI_CLASS_32>::Value value;
+    ElfSymbolEntryTypes<EI_CLASS_32>::Size size;
+    ElfSymbolEntryTypes<EI_CLASS_32>::Info info;
+    ElfSymbolEntryTypes<EI_CLASS_32>::Other other;
+    ElfSymbolEntryTypes<EI_CLASS_32>::Shndx shndx;
+};
+
+template <>
+struct ElfSymbolEntry<EI_CLASS_64> {
+    ElfSymbolEntryTypes<EI_CLASS_64>::Name name;
+    ElfSymbolEntryTypes<EI_CLASS_64>::Info info;
+    ElfSymbolEntryTypes<EI_CLASS_64>::Other other;
+    ElfSymbolEntryTypes<EI_CLASS_64>::Shndx shndx;
+    ElfSymbolEntryTypes<EI_CLASS_64>::Value value;
+    ElfSymbolEntryTypes<EI_CLASS_64>::Size size;
+};
+
+static_assert(sizeof(ElfSymbolEntry<EI_CLASS_32>) == 0x10, "");
+static_assert(sizeof(ElfSymbolEntry<EI_CLASS_64>) == 0x18, "");
+
+template <ELF_IDENTIFIER_CLASS NumBits>
+struct ElfRel;
+
+template <>
+struct ElfRel<EI_CLASS_32> {
+    uint32_t offset;
+    uint32_t info;
+};
+
+template <>
+struct ElfRel<EI_CLASS_64> {
+    uint64_t offset;
+    uint64_t info;
+};
+
+static_assert(sizeof(ElfRel<EI_CLASS_32>) == 0x8, "");
+static_assert(sizeof(ElfRel<EI_CLASS_64>) == 0x10, "");
+
+template <ELF_IDENTIFIER_CLASS NumBits>
+struct ElfRela;
+
+template <>
+struct ElfRela<EI_CLASS_32> {
+    uint32_t offset;
+    uint32_t info;
+    int32_t addend;
+};
+
+template <>
+struct ElfRela<EI_CLASS_64> {
+    uint64_t offset;
+    uint64_t info;
+    int64_t addend;
+};
+
+static_assert(sizeof(ElfRela<EI_CLASS_32>) == 0xc, "");
+static_assert(sizeof(ElfRela<EI_CLASS_64>) == 0x18, "");
+
 namespace SpecialSectionNames {
 static constexpr ConstStringRef bss = ".bss";                    // uninitialized memory
 static constexpr ConstStringRef comment = ".comment";            // version control information
 static constexpr ConstStringRef data = ".data";                  // initialized memory
 static constexpr ConstStringRef data1 = ".data1";                // initialized memory
 static constexpr ConstStringRef debug = ".debug";                // debug symbols
+static constexpr ConstStringRef debugInfo = ".debug_info";       // debug info
 static constexpr ConstStringRef dynamic = ".dynamic";            // dynamic linking information
 static constexpr ConstStringRef dynstr = ".dynstr";              // strings for dynamic linking
 static constexpr ConstStringRef dynsym = ".dynsym";              // dynamic linking symbol table

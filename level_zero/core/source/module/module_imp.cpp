@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019-2020 Intel Corporation
+ * Copyright (C) 2020-2022 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -7,16 +7,25 @@
 
 #include "level_zero/core/source/module/module_imp.h"
 
+#include "shared/source/compiler_interface/compiler_warnings/compiler_warnings.h"
 #include "shared/source/compiler_interface/intermediate_representations.h"
+#include "shared/source/compiler_interface/linker.h"
 #include "shared/source/device/device.h"
+#include "shared/source/device_binary_format/debug_zebin.h"
 #include "shared/source/device_binary_format/device_binary_formats.h"
+#include "shared/source/device_binary_format/elf/elf.h"
+#include "shared/source/device_binary_format/elf/elf_encoder.h"
+#include "shared/source/device_binary_format/elf/ocl_elf.h"
+#include "shared/source/helpers/api_specific_config.h"
+#include "shared/source/helpers/constants.h"
+#include "shared/source/helpers/kernel_helpers.h"
 #include "shared/source/helpers/string.h"
 #include "shared/source/memory_manager/memory_manager.h"
+#include "shared/source/memory_manager/memory_operations_handler.h"
 #include "shared/source/memory_manager/unified_memory_manager.h"
+#include "shared/source/program/kernel_info.h"
 #include "shared/source/program/program_initialization.h"
 #include "shared/source/source_level_debugger/source_level_debugger.h"
-
-#include "opencl/source/program/kernel_info.h"
 
 #include "level_zero/core/source/device/device.h"
 #include "level_zero/core/source/kernel/kernel.h"
@@ -26,12 +35,16 @@
 #include "program_debug_data.h"
 
 #include <memory>
+#include <unordered_map>
 
 namespace L0 {
 
 namespace BuildOptions {
-ConstStringRef optDisable = "-ze-opt-disable";
-ConstStringRef greaterThan4GbRequired = "-ze-opt-greater-than-4GB-buffer-required";
+NEO::ConstStringRef optDisable = "-ze-opt-disable";
+NEO::ConstStringRef optLevel = "-ze-opt-level";
+NEO::ConstStringRef greaterThan4GbRequired = "-ze-opt-greater-than-4GB-buffer-required";
+NEO::ConstStringRef hasBufferOffsetArg = "-ze-intel-has-buffer-offset-arg";
+NEO::ConstStringRef debugKernelEnable = "-ze-kernel-debug-enable";
 } // namespace BuildOptions
 
 ModuleTranslationUnit::ModuleTranslationUnit(L0::Device *device)
@@ -58,48 +71,118 @@ ModuleTranslationUnit::~ModuleTranslationUnit() {
             this->device->getNEODevice()->getExecutionEnvironment()->memoryManager->checkGpuUsageAndDestroyGraphicsAllocations(globalVarBuffer);
         }
     }
+
+    if (this->debugData != nullptr) {
+        for (std::vector<char *>::iterator iter = alignedvIsas.begin(); iter != alignedvIsas.end(); ++iter) {
+            alignedFree(static_cast<void *>(*iter));
+        }
+    }
 }
 
-bool ModuleTranslationUnit::buildFromSpirV(const char *input, uint32_t inputSize, const char *buildOptions, const char *internalBuildOptions,
-                                           const ze_module_constants_t *pConstants) {
-    auto compilerInterface = device->getNEODevice()->getCompilerInterface();
-    UNRECOVERABLE_IF(nullptr == compilerInterface);
-    UNRECOVERABLE_IF((nullptr == device) || (nullptr == device->getNEODevice()));
+std::vector<uint8_t> ModuleTranslationUnit::generateElfFromSpirV(std::vector<const char *> inputSpirVs, std::vector<uint32_t> inputModuleSizes) {
+    NEO::Elf::ElfEncoder<> elfEncoder(true, false, 1U);
+    elfEncoder.getElfFileHeader().type = NEO::Elf::ET_OPENCL_OBJECTS;
 
-    std::string options = buildOptions;
-    std::string internalOptions = NEO::CompilerOptions::concatenate(internalBuildOptions, NEO::CompilerOptions::hasBufferOffsetArg);
-
-    if (device->getNEODevice()->getDeviceInfo().debuggerActive) {
-        if (device->getSourceLevelDebugger()->isOptimizationDisabled()) {
-            NEO::CompilerOptions::concatenateAppend(options, NEO::CompilerOptions::optDisable);
+    StackVec<uint32_t, 64> specConstIds;
+    StackVec<uint64_t, 64> specConstValues;
+    for (uint32_t i = 0; i < static_cast<uint32_t>(inputSpirVs.size()); i++) {
+        if (specConstantsValues.size() > 0) {
+            specConstIds.clear();
+            specConstValues.clear();
+            specConstIds.reserve(specConstantsValues.size());
+            specConstValues.reserve(specConstantsValues.size());
+            for (const auto &specConst : specConstantsValues) {
+                specConstIds.push_back(specConst.first);
+                specConstValues.push_back(specConst.second);
+            }
+            elfEncoder.appendSection(NEO::Elf::SHT_OPENCL_SPIRV_SC_IDS, NEO::Elf::SectionNamesOpenCl::spirvSpecConstIds,
+                                     ArrayRef<const uint8_t>::fromAny(specConstIds.begin(), specConstIds.size()));
+            elfEncoder.appendSection(NEO::Elf::SHT_OPENCL_SPIRV_SC_VALUES, NEO::Elf::SectionNamesOpenCl::spirvSpecConstValues,
+                                     ArrayRef<const uint8_t>::fromAny(specConstValues.begin(), specConstValues.size()));
         }
-        options = NEO::CompilerOptions::concatenate(options, NEO::CompilerOptions::generateDebugInfo);
-        internalOptions = NEO::CompilerOptions::concatenate(internalOptions, NEO::CompilerOptions::debugKernelEnable);
+
+        auto sectionType = NEO::Elf::SHT_OPENCL_SPIRV;
+        NEO::ConstStringRef sectionName = NEO::Elf::SectionNamesOpenCl::spirvObject;
+        elfEncoder.appendSection(sectionType, sectionName, ArrayRef<const uint8_t>(reinterpret_cast<const uint8_t *>(inputSpirVs[i]), inputModuleSizes[i]));
     }
 
-    NEO::TranslationInput inputArgs = {IGC::CodeType::spirV, IGC::CodeType::oclGenBin};
+    return elfEncoder.encode();
+}
 
+std::string ModuleTranslationUnit::generateCompilerOptions(const char *buildOptions, const char *internalBuildOptions) {
+    if (nullptr != buildOptions) {
+        options = buildOptions;
+    }
+    std::string internalOptions = NEO::CompilerOptions::concatenate(internalBuildOptions, BuildOptions::hasBufferOffsetArg);
+
+    if (device->getNEODevice()->getDeviceInfo().debuggerActive) {
+        if (NEO::SourceLevelDebugger::shouldAppendOptDisable(*device->getSourceLevelDebugger())) {
+            NEO::CompilerOptions::concatenateAppend(options, BuildOptions::optDisable);
+        }
+
+        options = NEO::CompilerOptions::concatenate(options, NEO::CompilerOptions::generateDebugInfo);
+        internalOptions = NEO::CompilerOptions::concatenate(internalOptions, BuildOptions::debugKernelEnable);
+    }
+
+    if (NEO::DebugManager.flags.DisableStatelessToStatefulOptimization.get() ||
+        device->getNEODevice()->areSharedSystemAllocationsAllowed()) {
+        internalOptions = NEO::CompilerOptions::concatenate(internalOptions, NEO::CompilerOptions::greaterThan4gbBuffersRequired);
+    }
+
+    return internalOptions;
+}
+
+bool ModuleTranslationUnit::processSpecConstantInfo(NEO::CompilerInterface *compilerInterface, const ze_module_constants_t *pConstants, const char *input, uint32_t inputSize) {
     if (pConstants) {
+        NEO::SpecConstantInfo specConstInfo;
+        auto retVal = compilerInterface->getSpecConstantsInfo(*device->getNEODevice(), ArrayRef<const char>(input, inputSize), specConstInfo);
+        if (retVal != NEO::TranslationOutput::ErrorCode::Success) {
+            return false;
+        }
         for (uint32_t i = 0; i < pConstants->numConstants; i++) {
             uint64_t specConstantValue = 0;
-            memcpy_s(&specConstantValue, sizeof(uint64_t),
-                     reinterpret_cast<void *>(pConstants->pConstantValues[i]), sizeof(uint64_t));
             uint32_t specConstantId = pConstants->pConstantIds[i];
+            auto atributeSize = 0u;
+            uint32_t j;
+            for (j = 0; j < specConstInfo.sizesBuffer->GetSize<uint32_t>(); j++) {
+                if (specConstantId == specConstInfo.idsBuffer->GetMemory<uint32_t>()[j]) {
+                    atributeSize = specConstInfo.sizesBuffer->GetMemory<uint32_t>()[j];
+                    break;
+                }
+            }
+            if (j == specConstInfo.sizesBuffer->GetSize<uint32_t>()) {
+                return false;
+            }
+            memcpy_s(&specConstantValue, sizeof(uint64_t),
+                     const_cast<void *>(pConstants->pConstantValues[i]), atributeSize);
             specConstantsValues[specConstantId] = specConstantValue;
         }
     }
+    return true;
+}
 
-    inputArgs.src = ArrayRef<const char>(input, inputSize);
-    inputArgs.apiOptions = ArrayRef<const char>(options.c_str(), options.length());
-    inputArgs.internalOptions = ArrayRef<const char>(internalOptions.c_str(), internalOptions.length());
+bool ModuleTranslationUnit::compileGenBinary(NEO::TranslationInput inputArgs, bool staticLink) {
+    auto compilerInterface = device->getNEODevice()->getCompilerInterface();
+    UNRECOVERABLE_IF(nullptr == compilerInterface);
+
     inputArgs.specializedValues = this->specConstantsValues;
+
     NEO::TranslationOutput compilerOuput = {};
-    auto compilerErr = compilerInterface->build(*device->getNEODevice(), inputArgs, compilerOuput);
+    NEO::TranslationOutput::ErrorCode compilerErr;
+
+    if (staticLink) {
+        compilerErr = compilerInterface->link(*device->getNEODevice(), inputArgs, compilerOuput);
+    } else {
+        compilerErr = compilerInterface->build(*device->getNEODevice(), inputArgs, compilerOuput);
+    }
+
     this->updateBuildLog(compilerOuput.frontendCompilerLog);
     this->updateBuildLog(compilerOuput.backendCompilerLog);
+
     if (NEO::TranslationOutput::ErrorCode::Success != compilerErr) {
         return false;
     }
+
     this->irBinary = std::move(compilerOuput.intermediateRepresentation.mem);
     this->irBinarySize = compilerOuput.intermediateRepresentation.size;
     this->unpackedDeviceBinary = std::move(compilerOuput.deviceBinary.mem);
@@ -110,25 +193,69 @@ bool ModuleTranslationUnit::buildFromSpirV(const char *input, uint32_t inputSize
     return processUnpackedBinary();
 }
 
+bool ModuleTranslationUnit::staticLinkSpirV(std::vector<const char *> inputSpirVs, std::vector<uint32_t> inputModuleSizes, const char *buildOptions, const char *internalBuildOptions,
+                                            std::vector<const ze_module_constants_t *> specConstants) {
+    auto compilerInterface = device->getNEODevice()->getCompilerInterface();
+    UNRECOVERABLE_IF(nullptr == compilerInterface);
+
+    std::string internalOptions = this->generateCompilerOptions(buildOptions, internalBuildOptions);
+
+    for (uint32_t i = 0; i < static_cast<uint32_t>(specConstants.size()); i++) {
+        auto specConstantResult = this->processSpecConstantInfo(compilerInterface, specConstants[i], inputSpirVs[i], inputModuleSizes[i]);
+        if (!specConstantResult) {
+            return false;
+        }
+    }
+
+    NEO::TranslationInput linkInputArgs = {IGC::CodeType::elf, IGC::CodeType::oclGenBin};
+
+    auto spirvElfSource = generateElfFromSpirV(inputSpirVs, inputModuleSizes);
+
+    linkInputArgs.src = ArrayRef<const char>(reinterpret_cast<const char *>(spirvElfSource.data()), spirvElfSource.size());
+    linkInputArgs.apiOptions = ArrayRef<const char>(options.c_str(), options.length());
+    linkInputArgs.internalOptions = ArrayRef<const char>(internalOptions.c_str(), internalOptions.length());
+    return this->compileGenBinary(linkInputArgs, true);
+}
+
+bool ModuleTranslationUnit::buildFromSpirV(const char *input, uint32_t inputSize, const char *buildOptions, const char *internalBuildOptions,
+                                           const ze_module_constants_t *pConstants) {
+    auto compilerInterface = device->getNEODevice()->getCompilerInterface();
+    UNRECOVERABLE_IF(nullptr == compilerInterface);
+
+    std::string internalOptions = this->generateCompilerOptions(buildOptions, internalBuildOptions);
+
+    auto specConstantResult = this->processSpecConstantInfo(compilerInterface, pConstants, input, inputSize);
+    if (!specConstantResult)
+        return false;
+
+    NEO::TranslationInput inputArgs = {IGC::CodeType::spirV, IGC::CodeType::oclGenBin};
+
+    inputArgs.src = ArrayRef<const char>(input, inputSize);
+    inputArgs.apiOptions = ArrayRef<const char>(options.c_str(), options.length());
+    inputArgs.internalOptions = ArrayRef<const char>(internalOptions.c_str(), internalOptions.length());
+    return this->compileGenBinary(inputArgs, false);
+}
+
 bool ModuleTranslationUnit::createFromNativeBinary(const char *input, size_t inputSize) {
     UNRECOVERABLE_IF((nullptr == device) || (nullptr == device->getNEODevice()));
     auto productAbbreviation = NEO::hardwarePrefix[device->getNEODevice()->getHardwareInfo().platform.eProductFamily];
 
     NEO::TargetDevice targetDevice = {};
     targetDevice.coreFamily = device->getNEODevice()->getHardwareInfo().platform.eRenderCoreFamily;
+    targetDevice.productFamily = device->getNEODevice()->getHardwareInfo().platform.eProductFamily;
     targetDevice.stepping = device->getNEODevice()->getHardwareInfo().platform.usRevId;
     targetDevice.maxPointerSizeInBytes = sizeof(uintptr_t);
     std::string decodeErrors;
     std::string decodeWarnings;
     ArrayRef<const uint8_t> archive(reinterpret_cast<const uint8_t *>(input), inputSize);
-    auto singleDeviceBinary = unpackSingleDeviceBinary(archive, ConstStringRef(productAbbreviation, strlen(productAbbreviation)), targetDevice,
+    auto singleDeviceBinary = unpackSingleDeviceBinary(archive, NEO::ConstStringRef(productAbbreviation, strlen(productAbbreviation)), targetDevice,
                                                        decodeErrors, decodeWarnings);
     if (decodeWarnings.empty() == false) {
-        NEO::printDebugString(NEO::DebugManager.flags.PrintDebugMessages.get(), stderr, "%s\n", decodeWarnings.c_str());
+        PRINT_DEBUG_STRING(NEO::DebugManager.flags.PrintDebugMessages.get(), stderr, "%s\n", decodeWarnings.c_str());
     }
 
     if (singleDeviceBinary.intermediateRepresentation.empty() && singleDeviceBinary.deviceBinary.empty()) {
-        NEO::printDebugString(NEO::DebugManager.flags.PrintDebugMessages.get(), stderr, "%s\n", decodeErrors.c_str());
+        PRINT_DEBUG_STRING(NEO::DebugManager.flags.PrintDebugMessages.get(), stderr, "%s\n", decodeErrors.c_str());
         return false;
     } else {
         this->irBinary = makeCopy(reinterpret_cast<const char *>(singleDeviceBinary.intermediateRepresentation.begin()), singleDeviceBinary.intermediateRepresentation.size());
@@ -140,7 +267,8 @@ bool ModuleTranslationUnit::createFromNativeBinary(const char *input, size_t inp
             this->debugDataSize = singleDeviceBinary.debugData.size();
         }
 
-        if ((false == singleDeviceBinary.deviceBinary.empty()) && (false == NEO::DebugManager.flags.RebuildPrecompiledKernels.get())) {
+        bool rebuild = NEO::DebugManager.flags.RebuildPrecompiledKernels.get() && irBinarySize != 0;
+        if ((false == singleDeviceBinary.deviceBinary.empty()) && (false == rebuild)) {
             this->unpackedDeviceBinary = makeCopy<char>(reinterpret_cast<const char *>(singleDeviceBinary.deviceBinary.begin()), singleDeviceBinary.deviceBinary.size());
             this->unpackedDeviceBinarySize = singleDeviceBinary.deviceBinary.size();
             this->packedDeviceBinary = makeCopy<char>(reinterpret_cast<const char *>(archive.begin()), archive.size());
@@ -149,6 +277,10 @@ bool ModuleTranslationUnit::createFromNativeBinary(const char *input, size_t inp
     }
 
     if (nullptr == this->unpackedDeviceBinary) {
+        if (!shouldSuppressRebuildWarning) {
+            updateBuildLog(NEO::CompilerWarnings::recompiledFromIr.str());
+        }
+
         return buildFromSpirV(this->irBinary.get(), static_cast<uint32_t>(this->irBinarySize), this->options.c_str(), "", nullptr);
     } else {
         return processUnpackedBinary();
@@ -162,19 +294,34 @@ bool ModuleTranslationUnit::processUnpackedBinary() {
     auto blob = ArrayRef<const uint8_t>(reinterpret_cast<const uint8_t *>(this->unpackedDeviceBinary.get()), this->unpackedDeviceBinarySize);
     NEO::SingleDeviceBinary binary = {};
     binary.deviceBinary = blob;
+    binary.targetDevice.grfSize = device->getHwInfo().capabilityTable.grfSize;
     std::string decodeErrors;
     std::string decodeWarnings;
 
     NEO::DecodeError decodeError;
     NEO::DeviceBinaryFormat singleDeviceBinaryFormat;
+    programInfo.levelZeroDynamicLinkProgram = true;
     std::tie(decodeError, singleDeviceBinaryFormat) = NEO::decodeSingleDeviceBinary(programInfo, binary, decodeErrors, decodeWarnings);
     if (decodeWarnings.empty() == false) {
-        NEO::printDebugString(NEO::DebugManager.flags.PrintDebugMessages.get(), stderr, "%s\n", decodeWarnings.c_str());
+        PRINT_DEBUG_STRING(NEO::DebugManager.flags.PrintDebugMessages.get(), stderr, "%s\n", decodeWarnings.c_str());
     }
 
     if (NEO::DecodeError::Success != decodeError) {
-        NEO::printDebugString(NEO::DebugManager.flags.PrintDebugMessages.get(), stderr, "%s\n", decodeErrors.c_str());
+        PRINT_DEBUG_STRING(NEO::DebugManager.flags.PrintDebugMessages.get(), stderr, "%s\n", decodeErrors.c_str());
         return false;
+    }
+
+    if (programInfo.decodedElf.elfFileHeader) {
+        NEO::LinkerInput::SectionNameToSegmentIdMap nameToKernelId;
+
+        uint32_t id = 0;
+        for (auto &kernelInfo : this->programInfo.kernelInfos) {
+            nameToKernelId[kernelInfo->kernelDescriptor.kernelMetadata.kernelName] = id;
+            id++;
+        }
+        programInfo.prepareLinkerInputStorage();
+        programInfo.linkerInput->undefinedSymbolsAllowed = programInfo.levelZeroDynamicLinkProgram;
+        programInfo.linkerInput->decodeElfSymbolTableAndRelocations(programInfo.decodedElf, nameToKernelId);
     }
 
     processDebugData();
@@ -261,26 +408,30 @@ void ModuleTranslationUnit::processDebugData() {
             kernelName = reinterpret_cast<const char *>(ptrOffset(kernelDebugHeader, sizeof(iOpenCL::SKernelDebugDataHeaderIGC)));
 
             auto kernelInfo = programInfo.kernelInfos[i];
-            UNRECOVERABLE_IF(kernelInfo->name.compare(0, kernelInfo->name.size(), kernelName) != 0);
+            UNRECOVERABLE_IF(kernelInfo->kernelDescriptor.kernelMetadata.kernelName.compare(0, kernelInfo->kernelDescriptor.kernelMetadata.kernelName.size(), kernelName) != 0);
 
             kernelDebugData = ptrOffset(kernelName, kernelDebugHeader->KernelNameSize);
 
             kernelInfo->kernelDescriptor.external.debugData = std::make_unique<NEO::DebugData>();
 
-            kernelInfo->kernelDescriptor.external.debugData->vIsa = kernelDebugData;
+            char *alignedAlloc = static_cast<char *>(alignedMalloc(kernelDebugHeader->SizeVisaDbgInBytes, MemoryConstants::pageSize));
+            memcpy_s(static_cast<void *>(alignedAlloc), kernelDebugHeader->SizeVisaDbgInBytes, kernelDebugData, kernelDebugHeader->SizeVisaDbgInBytes);
+
+            kernelInfo->kernelDescriptor.external.debugData->vIsa = alignedAlloc;
             kernelInfo->kernelDescriptor.external.debugData->genIsa = ptrOffset(kernelDebugData, kernelDebugHeader->SizeVisaDbgInBytes);
             kernelInfo->kernelDescriptor.external.debugData->vIsaSize = kernelDebugHeader->SizeVisaDbgInBytes;
             kernelInfo->kernelDescriptor.external.debugData->genIsaSize = kernelDebugHeader->SizeGenIsaDbgInBytes;
 
             kernelDebugData = ptrOffset(kernelDebugData, static_cast<size_t>(kernelDebugHeader->SizeVisaDbgInBytes) + kernelDebugHeader->SizeGenIsaDbgInBytes);
             kernelDebugHeader = reinterpret_cast<const iOpenCL::SKernelDebugDataHeaderIGC *>(kernelDebugData);
+            alignedvIsas.push_back(alignedAlloc);
         }
     }
 }
 
-ModuleImp::ModuleImp(Device *device, ModuleBuildLog *moduleBuildLog)
+ModuleImp::ModuleImp(Device *device, ModuleBuildLog *moduleBuildLog, ModuleType type)
     : device(device), translationUnit(std::make_unique<ModuleTranslationUnit>(device)),
-      moduleBuildLog(moduleBuildLog) {
+      moduleBuildLog(moduleBuildLog), type(type) {
     productFamily = device->getHwInfo().platform.eProductFamily;
 }
 
@@ -288,40 +439,97 @@ ModuleImp::~ModuleImp() {
     kernelImmDatas.clear();
 }
 
+NEO::Debug::Segments ModuleImp::getZebinSegments() {
+    std::vector<std::pair<std::string_view, NEO::GraphicsAllocation *>> kernels;
+    for (const auto &kernelImmData : kernelImmDatas)
+        kernels.push_back({kernelImmData->getDescriptor().kernelMetadata.kernelName, kernelImmData->getIsaGraphicsAllocation()});
+    ArrayRef<const uint8_t> strings = {reinterpret_cast<const uint8_t *>(translationUnit->programInfo.globalStrings.initData),
+                                       translationUnit->programInfo.globalStrings.size};
+    return NEO::Debug::Segments(translationUnit->globalVarBuffer, translationUnit->globalConstBuffer, strings, kernels);
+}
+
 bool ModuleImp::initialize(const ze_module_desc_t *desc, NEO::Device *neoDevice) {
     bool success = true;
-    NEO::useKernelDescriptor = true;
 
     std::string buildOptions;
     std::string internalBuildOptions;
 
-    this->createBuildOptions(desc->pBuildFlags, buildOptions, internalBuildOptions);
+    if (desc->pNext) {
+        const ze_base_desc_t *expDesc = reinterpret_cast<const ze_base_desc_t *>(desc->pNext);
+        if (expDesc->stype == ZE_STRUCTURE_TYPE_MODULE_PROGRAM_EXP_DESC) {
+            if (desc->format != ZE_MODULE_FORMAT_IL_SPIRV) {
+                return false;
+            }
+            const ze_module_program_exp_desc_t *programExpDesc =
+                reinterpret_cast<const ze_module_program_exp_desc_t *>(expDesc);
+            std::vector<const char *> inputSpirVs;
+            std::vector<uint32_t> inputModuleSizes;
+            std::vector<const ze_module_constants_t *> specConstants;
+            const ze_module_constants_t *firstSpecConstants = nullptr;
 
-    if (desc->format == ZE_MODULE_FORMAT_NATIVE) {
-        success = this->translationUnit->createFromNativeBinary(
-            reinterpret_cast<const char *>(desc->pInputModule), desc->inputSize);
-    } else if (desc->format == ZE_MODULE_FORMAT_IL_SPIRV) {
-        success = this->translationUnit->buildFromSpirV(reinterpret_cast<const char *>(desc->pInputModule),
-                                                        static_cast<uint32_t>(desc->inputSize),
-                                                        buildOptions.c_str(),
-                                                        internalBuildOptions.c_str(),
-                                                        desc->pConstants);
+            this->createBuildOptions(nullptr, buildOptions, internalBuildOptions);
+
+            for (uint32_t i = 0; i < static_cast<uint32_t>(programExpDesc->count); i++) {
+                std::string tmpBuildOptions;
+                std::string tmpInternalBuildOptions;
+                inputSpirVs.push_back(reinterpret_cast<const char *>(programExpDesc->pInputModules[i]));
+                auto inputSizesInfo = const_cast<size_t *>(programExpDesc->inputSizes);
+                uint32_t inputSize = static_cast<uint32_t>(inputSizesInfo[i]);
+                inputModuleSizes.push_back(inputSize);
+                if (programExpDesc->pConstants) {
+                    specConstants.push_back(programExpDesc->pConstants[i]);
+                    if (i == 0) {
+                        firstSpecConstants = specConstants[0];
+                    }
+                }
+                if (programExpDesc->pBuildFlags) {
+                    this->createBuildOptions(programExpDesc->pBuildFlags[i], tmpBuildOptions, tmpInternalBuildOptions);
+                    buildOptions = buildOptions + tmpBuildOptions;
+                    internalBuildOptions = internalBuildOptions + tmpInternalBuildOptions;
+                }
+            }
+            //If the user passed in only 1 SPIRV, then fallback to standard build
+            if (inputSpirVs.size() > 1) {
+                success = this->translationUnit->staticLinkSpirV(inputSpirVs,
+                                                                 inputModuleSizes,
+                                                                 buildOptions.c_str(),
+                                                                 internalBuildOptions.c_str(),
+                                                                 specConstants);
+            } else {
+                success = this->translationUnit->buildFromSpirV(reinterpret_cast<const char *>(programExpDesc->pInputModules[0]),
+                                                                inputModuleSizes[0],
+                                                                buildOptions.c_str(),
+                                                                internalBuildOptions.c_str(),
+                                                                firstSpecConstants);
+            }
+        } else {
+            return false;
+        }
     } else {
-        return false;
-    }
+        std::string buildFlagsInput{desc->pBuildFlags != nullptr ? desc->pBuildFlags : ""};
+        this->translationUnit->shouldSuppressRebuildWarning = NEO::CompilerOptions::extract(NEO::CompilerOptions::noRecompiledFromIr, buildFlagsInput);
+        this->createBuildOptions(buildFlagsInput.c_str(), buildOptions, internalBuildOptions);
 
-    verifyDebugCapabilities();
+        if (type == ModuleType::User && NEO::DebugManager.flags.InjectInternalBuildOptions.get() != "unk") {
+            NEO::CompilerOptions::concatenateAppend(internalBuildOptions, NEO::DebugManager.flags.InjectInternalBuildOptions.get());
+        }
 
-    this->updateBuildLog(neoDevice);
-
-    if (debugEnabled) {
-        for (auto kernelInfo : this->translationUnit->programInfo.kernelInfos) {
-            device->getSourceLevelDebugger()->notifyKernelDebugData(kernelInfo->kernelDescriptor.external.debugData.get(),
-                                                                    kernelInfo->kernelDescriptor.kernelMetadata.kernelName,
-                                                                    kernelInfo->heapInfo.pKernelHeap,
-                                                                    kernelInfo->heapInfo.KernelHeapSize);
+        if (desc->format == ZE_MODULE_FORMAT_NATIVE) {
+            success = this->translationUnit->createFromNativeBinary(
+                reinterpret_cast<const char *>(desc->pInputModule), desc->inputSize);
+        } else if (desc->format == ZE_MODULE_FORMAT_IL_SPIRV) {
+            success = this->translationUnit->buildFromSpirV(reinterpret_cast<const char *>(desc->pInputModule),
+                                                            static_cast<uint32_t>(desc->inputSize),
+                                                            buildOptions.c_str(),
+                                                            internalBuildOptions.c_str(),
+                                                            desc->pConstants);
+        } else {
+            return false;
         }
     }
+
+    this->updateBuildLog(neoDevice);
+    verifyDebugCapabilities();
 
     if (false == success) {
         return false;
@@ -330,15 +538,92 @@ bool ModuleImp::initialize(const ze_module_desc_t *desc, NEO::Device *neoDevice)
     kernelImmDatas.reserve(this->translationUnit->programInfo.kernelInfos.size());
     for (auto &ki : this->translationUnit->programInfo.kernelInfos) {
         std::unique_ptr<KernelImmutableData> kernelImmData{new KernelImmutableData(this->device)};
-        kernelImmData->initialize(ki, *(getDevice()->getDriverHandle()->getMemoryManager()),
-                                  device->getNEODevice(),
-                                  device->getNEODevice()->getDeviceInfo().computeUnitsUsedForScratch,
-                                  this->translationUnit->globalConstBuffer, this->translationUnit->globalVarBuffer);
+        kernelImmData->initialize(ki, device, device->getNEODevice()->getDeviceInfo().computeUnitsUsedForScratch,
+                                  this->translationUnit->globalConstBuffer, this->translationUnit->globalVarBuffer,
+                                  this->type == ModuleType::Builtin);
         kernelImmDatas.push_back(std::move(kernelImmData));
     }
+
+    registerElfInDebuggerL0(neoDevice);
     this->maxGroupSize = static_cast<uint32_t>(this->translationUnit->device->getNEODevice()->getDeviceInfo().maxWorkGroupSize);
 
-    return this->linkBinary();
+    checkIfPrivateMemoryPerDispatchIsNeeded();
+
+    success = this->linkBinary();
+
+    if (debugEnabled) {
+        passDebugData();
+    }
+
+    auto &hwInfo = neoDevice->getHardwareInfo();
+    auto &hwHelper = NEO::HwHelper::get(hwInfo.platform.eRenderCoreFamily);
+
+    if (this->isFullyLinked) {
+        for (auto &ki : kernelImmDatas) {
+
+            if (this->type == ModuleType::User && !ki->isIsaCopiedToAllocation()) {
+
+                NEO::MemoryTransferHelper::transferMemoryToAllocation(hwHelper.isBlitCopyRequiredForLocalMemory(hwInfo, *ki->getIsaGraphicsAllocation()),
+                                                                      *neoDevice, ki->getIsaGraphicsAllocation(), 0, ki->getKernelInfo()->heapInfo.pKernelHeap,
+                                                                      static_cast<size_t>(ki->getKernelInfo()->heapInfo.KernelHeapSize));
+
+                ki->setIsaCopiedToAllocation();
+            }
+
+            if (device->getL0Debugger()) {
+                NEO::MemoryOperationsHandler *memoryOperationsIface = neoDevice->getRootDeviceEnvironment().memoryOperationsInterface.get();
+                if (memoryOperationsIface) {
+                    auto allocation = ki->getIsaGraphicsAllocation();
+                    memoryOperationsIface->makeResident(neoDevice, ArrayRef<NEO::GraphicsAllocation *>(&allocation, 1));
+                }
+            }
+        }
+    }
+    return success;
+}
+
+void ModuleImp::createDebugZebin() {
+    auto refBin = ArrayRef<const uint8_t>(reinterpret_cast<const uint8_t *>(translationUnit->unpackedDeviceBinary.get()), translationUnit->unpackedDeviceBinarySize);
+    auto segments = getZebinSegments();
+    auto debugZebin = NEO::Debug::createDebugZebin(refBin, segments);
+
+    translationUnit->debugDataSize = debugZebin.size();
+    translationUnit->debugData.reset(new char[translationUnit->debugDataSize]);
+    memcpy_s(translationUnit->debugData.get(), translationUnit->debugDataSize,
+             debugZebin.data(), debugZebin.size());
+}
+
+void ModuleImp::passDebugData() {
+    auto refBin = ArrayRef<const uint8_t>(reinterpret_cast<const uint8_t *>(translationUnit->unpackedDeviceBinary.get()), translationUnit->unpackedDeviceBinarySize);
+    if (NEO::isDeviceBinaryFormat<NEO::DeviceBinaryFormat::Zebin>(refBin)) {
+        createDebugZebin();
+        if (device->getSourceLevelDebugger()) {
+            NEO::DebugData debugData; // pass debug zebin in vIsa field
+            debugData.vIsa = reinterpret_cast<const char *>(translationUnit->debugData.get());
+            debugData.vIsaSize = static_cast<uint32_t>(translationUnit->debugDataSize);
+            device->getSourceLevelDebugger()->notifyKernelDebugData(&debugData, "debug_zebin", nullptr, 0);
+        }
+    } else {
+        if (device->getSourceLevelDebugger()) {
+            for (auto kernelInfo : this->translationUnit->programInfo.kernelInfos) {
+                NEO::DebugData *notifyDebugData = kernelInfo->kernelDescriptor.external.debugData.get();
+                NEO::DebugData relocatedDebugData;
+
+                if (kernelInfo->kernelDescriptor.external.relocatedDebugData.get()) {
+                    relocatedDebugData.genIsa = kernelInfo->kernelDescriptor.external.debugData->genIsa;
+                    relocatedDebugData.genIsaSize = kernelInfo->kernelDescriptor.external.debugData->genIsaSize;
+                    relocatedDebugData.vIsa = reinterpret_cast<char *>(kernelInfo->kernelDescriptor.external.relocatedDebugData.get());
+                    relocatedDebugData.vIsaSize = kernelInfo->kernelDescriptor.external.debugData->vIsaSize;
+                    notifyDebugData = &relocatedDebugData;
+                }
+
+                device->getSourceLevelDebugger()->notifyKernelDebugData(notifyDebugData,
+                                                                        kernelInfo->kernelDescriptor.kernelMetadata.kernelName,
+                                                                        kernelInfo->heapInfo.pKernelHeap,
+                                                                        kernelInfo->heapInfo.KernelHeapSize);
+            }
+        }
+    }
 }
 
 const KernelImmutableData *ModuleImp::getKernelImmutableData(const char *functionName) const {
@@ -356,8 +641,14 @@ void ModuleImp::createBuildOptions(const char *pBuildFlags, std::string &apiOpti
 
         apiOptions = pBuildFlags;
         moveBuildOption(apiOptions, apiOptions, NEO::CompilerOptions::optDisable, BuildOptions::optDisable);
+        moveBuildOption(apiOptions, apiOptions, NEO::CompilerOptions::optLevel, BuildOptions::optLevel);
         moveBuildOption(internalBuildOptions, apiOptions, NEO::CompilerOptions::greaterThan4gbBuffersRequired, BuildOptions::greaterThan4GbRequired);
+        moveBuildOption(internalBuildOptions, apiOptions, NEO::CompilerOptions::allowZebin, NEO::CompilerOptions::allowZebin);
+
         createBuildExtraOptions(apiOptions, internalBuildOptions);
+    }
+    if (NEO::ApiSpecificConfig::getBindlessConfiguration()) {
+        NEO::CompilerOptions::concatenateAppend(internalBuildOptions, NEO::CompilerOptions::bindlessMode.str());
     }
 }
 
@@ -371,7 +662,7 @@ ze_result_t ModuleImp::createKernel(const ze_kernel_desc_t *desc,
                                     ze_kernel_handle_t *phFunction) {
     ze_result_t res;
     if (!isFullyLinked) {
-        return ZE_RESULT_ERROR_MODULE_BUILD_FAILURE;
+        return ZE_RESULT_ERROR_INVALID_MODULE_UNLINKED;
     }
     auto kernel = Kernel::create(productFamily, this, desc, &res);
 
@@ -396,24 +687,59 @@ ze_result_t ModuleImp::getDebugInfo(size_t *pDebugDataSize, uint8_t *pDebugData)
     if (translationUnit == nullptr) {
         return ZE_RESULT_ERROR_UNINITIALIZED;
     }
-    if (pDebugData == nullptr) {
-        *pDebugDataSize = translationUnit->debugDataSize;
-        return ZE_RESULT_SUCCESS;
+    auto refBin = ArrayRef<const uint8_t>(reinterpret_cast<const uint8_t *>(translationUnit->unpackedDeviceBinary.get()), translationUnit->unpackedDeviceBinarySize);
+    if (nullptr == translationUnit->debugData.get() && NEO::isDeviceBinaryFormat<NEO::DeviceBinaryFormat::Zebin>(refBin)) {
+        createDebugZebin();
     }
-    memcpy_s(pDebugData, *pDebugDataSize, translationUnit->debugData.get(), translationUnit->debugDataSize);
+    if (pDebugData != nullptr) {
+        if (*pDebugDataSize < translationUnit->debugDataSize) {
+            return ZE_RESULT_ERROR_INVALID_ARGUMENT;
+        }
+        memcpy_s(pDebugData, *pDebugDataSize, translationUnit->debugData.get(), translationUnit->debugDataSize);
+    }
+    *pDebugDataSize = translationUnit->debugDataSize;
     return ZE_RESULT_SUCCESS;
+}
+
+void ModuleImp::copyPatchedSegments(const NEO::Linker::PatchableSegments &isaSegmentsForPatching) {
+    if (this->translationUnit->programInfo.linkerInput && this->translationUnit->programInfo.linkerInput->getTraits().requiresPatchingOfInstructionSegments) {
+        for (auto &kernelImmData : this->kernelImmDatas) {
+            if (nullptr == kernelImmData->getIsaGraphicsAllocation()) {
+                continue;
+            }
+
+            UNRECOVERABLE_IF(kernelImmData->isIsaCopiedToAllocation());
+
+            kernelImmData->getIsaGraphicsAllocation()->setTbxWritable(true, std::numeric_limits<uint32_t>::max());
+            kernelImmData->getIsaGraphicsAllocation()->setAubWritable(true, std::numeric_limits<uint32_t>::max());
+            auto segmentId = &kernelImmData - &this->kernelImmDatas[0];
+            this->device->getDriverHandle()->getMemoryManager()->copyMemoryToAllocation(kernelImmData->getIsaGraphicsAllocation(), 0,
+                                                                                        isaSegmentsForPatching[segmentId].hostPointer,
+                                                                                        isaSegmentsForPatching[segmentId].segmentSize);
+
+            kernelImmData->setIsaCopiedToAllocation();
+
+            if (device->getL0Debugger()) {
+                NEO::MemoryOperationsHandler *memoryOperationsIface = device->getNEODevice()->getRootDeviceEnvironment().memoryOperationsInterface.get();
+                auto allocation = kernelImmData->getIsaGraphicsAllocation();
+                memoryOperationsIface->makeResident(device->getNEODevice(), ArrayRef<NEO::GraphicsAllocation *>(&allocation, 1));
+            }
+        }
+    }
 }
 
 bool ModuleImp::linkBinary() {
     using namespace NEO;
-    if (this->translationUnit->programInfo.linkerInput == nullptr) {
+    auto linkerInput = this->translationUnit->programInfo.linkerInput.get();
+    if (linkerInput == nullptr) {
         isFullyLinked = true;
         return true;
     }
-    Linker linker(*this->translationUnit->programInfo.linkerInput);
+    Linker linker(*linkerInput);
     Linker::SegmentInfo globals;
     Linker::SegmentInfo constants;
     Linker::SegmentInfo exportedFunctions;
+    Linker::SegmentInfo strings;
     GraphicsAllocation *globalsForPatching = translationUnit->globalVarBuffer;
     GraphicsAllocation *constantsForPatching = translationUnit->globalConstBuffer;
     if (globalsForPatching != nullptr) {
@@ -424,54 +750,65 @@ bool ModuleImp::linkBinary() {
         constants.gpuAddress = static_cast<uintptr_t>(constantsForPatching->getGpuAddress());
         constants.segmentSize = constantsForPatching->getUnderlyingBufferSize();
     }
-    if (this->translationUnit->programInfo.linkerInput->getExportedFunctionsSegmentId() >= 0) {
-        auto exportedFunctionHeapId = this->translationUnit->programInfo.linkerInput->getExportedFunctionsSegmentId();
+    if (translationUnit->programInfo.globalStrings.initData != nullptr) {
+        strings.gpuAddress = reinterpret_cast<uintptr_t>(translationUnit->programInfo.globalStrings.initData);
+        strings.segmentSize = translationUnit->programInfo.globalStrings.size;
+    }
+    if (linkerInput->getExportedFunctionsSegmentId() >= 0) {
+        auto exportedFunctionHeapId = linkerInput->getExportedFunctionsSegmentId();
         this->exportedFunctionsSurface = this->kernelImmDatas[exportedFunctionHeapId]->getIsaGraphicsAllocation();
         exportedFunctions.gpuAddress = static_cast<uintptr_t>(exportedFunctionsSurface->getGpuAddressToPatch());
         exportedFunctions.segmentSize = exportedFunctionsSurface->getUnderlyingBufferSize();
     }
     Linker::PatchableSegments isaSegmentsForPatching;
     std::vector<std::vector<char>> patchedIsaTempStorage;
-    if (this->translationUnit->programInfo.linkerInput->getTraits().requiresPatchingOfInstructionSegments) {
+    Linker::KernelDescriptorsT kernelDescriptors;
+    if (linkerInput->getTraits().requiresPatchingOfInstructionSegments) {
         patchedIsaTempStorage.reserve(this->kernelImmDatas.size());
+        kernelDescriptors.reserve(this->kernelImmDatas.size());
         for (const auto &kernelInfo : this->translationUnit->programInfo.kernelInfos) {
             auto &kernHeapInfo = kernelInfo->heapInfo;
             const char *originalIsa = reinterpret_cast<const char *>(kernHeapInfo.pKernelHeap);
             patchedIsaTempStorage.push_back(std::vector<char>(originalIsa, originalIsa + kernHeapInfo.KernelHeapSize));
             isaSegmentsForPatching.push_back(Linker::PatchableSegment{patchedIsaTempStorage.rbegin()->data(), kernHeapInfo.KernelHeapSize});
+            kernelDescriptors.push_back(&kernelInfo->kernelDescriptor);
         }
     }
 
-    Linker::UnresolvedExternals unresolvedExternalsInfo;
-    auto linkStatus = linker.link(globals, constants, exportedFunctions,
+    auto linkStatus = linker.link(globals, constants, exportedFunctions, strings,
                                   globalsForPatching, constantsForPatching,
                                   isaSegmentsForPatching, unresolvedExternalsInfo, this->device->getNEODevice(),
                                   translationUnit->programInfo.globalConstants.initData,
-                                  translationUnit->programInfo.globalVariables.initData);
+                                  translationUnit->programInfo.globalVariables.initData, kernelDescriptors);
     this->symbols = linker.extractRelocatedSymbols();
     if (LinkingStatus::LinkedFully != linkStatus) {
         if (moduleBuildLog) {
             std::vector<std::string> kernelNames;
             for (const auto &kernelInfo : this->translationUnit->programInfo.kernelInfos) {
-                kernelNames.push_back("kernel : " + kernelInfo->name);
+                kernelNames.push_back("kernel : " + kernelInfo->kernelDescriptor.kernelMetadata.kernelName);
             }
             auto error = constructLinkerErrorMessage(unresolvedExternalsInfo, kernelNames);
             moduleBuildLog->appendString(error.c_str(), error.size());
         }
+        isFullyLinked = false;
         return LinkingStatus::LinkedPartially == linkStatus;
-    } else if (this->translationUnit->programInfo.linkerInput->getTraits().requiresPatchingOfInstructionSegments) {
-        for (const auto &kernelImmData : this->kernelImmDatas) {
-            if (nullptr == kernelImmData->getIsaGraphicsAllocation()) {
-                continue;
-            }
-            auto segmentId = &kernelImmData - &this->kernelImmDatas[0];
-            this->device->getDriverHandle()->getMemoryManager()->copyMemoryToAllocation(kernelImmData->getIsaGraphicsAllocation(),
-                                                                                        isaSegmentsForPatching[segmentId].hostPointer,
-                                                                                        isaSegmentsForPatching[segmentId].segmentSize);
-        }
+    } else if (type != ModuleType::Builtin) {
+        copyPatchedSegments(isaSegmentsForPatching);
     }
     DBG_LOG(PrintRelocations, NEO::constructRelocationsDebugMessage(this->symbols));
     isFullyLinked = true;
+    for (auto kernelId = 0u; kernelId < kernelImmDatas.size(); kernelId++) {
+        auto &kernImmData = kernelImmDatas[kernelId];
+
+        kernImmData->getResidencyContainer().reserve(kernImmData->getResidencyContainer().size() +
+                                                     ((this->exportedFunctionsSurface != nullptr) ? 1 : 0) + this->importedSymbolAllocations.size());
+
+        if (nullptr != this->exportedFunctionsSurface) {
+            kernImmData->getResidencyContainer().push_back(this->exportedFunctionsSurface);
+        }
+        kernImmData->getResidencyContainer().insert(kernImmData->getResidencyContainer().end(), this->importedSymbolAllocations.begin(),
+                                                    this->importedSymbolAllocations.end());
+    }
     return true;
 }
 
@@ -485,18 +822,23 @@ ze_result_t ModuleImp::getFunctionPointer(const char *pFunctionName, void **pfnF
     return ZE_RESULT_SUCCESS;
 }
 
-ze_result_t ModuleImp::getGlobalPointer(const char *pGlobalName, void **pPtr) {
+ze_result_t ModuleImp::getGlobalPointer(const char *pGlobalName, size_t *pSize, void **pPtr) {
     auto symbolIt = symbols.find(pGlobalName);
     if ((symbolIt == symbols.end()) || (symbolIt->second.symbol.segment == NEO::SegmentType::Instructions)) {
         return ZE_RESULT_ERROR_INVALID_ARGUMENT;
     }
-    *pPtr = reinterpret_cast<void *>(symbolIt->second.gpuAddress);
+    if (pPtr) {
+        *pPtr = reinterpret_cast<void *>(symbolIt->second.gpuAddress);
+    }
+    if (pSize) {
+        *pSize = symbolIt->second.symbol.size;
+    }
     return ZE_RESULT_SUCCESS;
 }
 
 Module *Module::create(Device *device, const ze_module_desc_t *desc,
-                       ModuleBuildLog *moduleBuildLog) {
-    auto module = new ModuleImp(device, moduleBuildLog);
+                       ModuleBuildLog *moduleBuildLog, ModuleType type) {
+    auto module = new ModuleImp(device, moduleBuildLog, type);
 
     bool success = module->initialize(desc, device->getNEODevice());
     if (success == false) {
@@ -535,7 +877,7 @@ bool ModuleImp::isDebugEnabled() const {
 }
 
 void ModuleImp::verifyDebugCapabilities() {
-    bool debugCapabilities = device->getNEODevice()->isDebuggerActive();
+    bool debugCapabilities = device->getNEODevice()->getDebugger() != nullptr;
 
     if (debugCapabilities) {
         //verify all kernels are debuggable
@@ -549,20 +891,162 @@ void ModuleImp::verifyDebugCapabilities() {
     debugEnabled = debugCapabilities;
 }
 
+void ModuleImp::checkIfPrivateMemoryPerDispatchIsNeeded() {
+    size_t modulePrivateMemorySize = 0;
+    for (auto &kernelImmData : this->kernelImmDatas) {
+        if (0 == kernelImmData->getDescriptor().kernelAttributes.perHwThreadPrivateMemorySize) {
+            continue;
+        }
+        auto kernelPrivateMemorySize = NEO::KernelHelper::getPrivateSurfaceSize(kernelImmData->getDescriptor().kernelAttributes.perHwThreadPrivateMemorySize,
+                                                                                this->device->getNEODevice()->getDeviceInfo().computeUnitsUsedForScratch);
+        modulePrivateMemorySize += kernelPrivateMemorySize;
+    }
+
+    this->allocatePrivateMemoryPerDispatch = false;
+    if (modulePrivateMemorySize > 0U) {
+        auto globalMemorySize = device->getNEODevice()->getRootDevice()->getGlobalMemorySize(static_cast<uint32_t>(device->getNEODevice()->getDeviceBitfield().to_ulong()));
+        this->allocatePrivateMemoryPerDispatch = modulePrivateMemorySize > globalMemorySize;
+    }
+}
+
+ze_result_t ModuleImp::getProperties(ze_module_properties_t *pModuleProperties) {
+
+    pModuleProperties->flags = 0;
+
+    if (!unresolvedExternalsInfo.empty()) {
+        pModuleProperties->flags |= ZE_MODULE_PROPERTY_FLAG_IMPORTS;
+    }
+
+    return ZE_RESULT_SUCCESS;
+}
+
 ze_result_t ModuleImp::performDynamicLink(uint32_t numModules,
                                           ze_module_handle_t *phModules,
                                           ze_module_build_log_handle_t *phLinkLog) {
-    return ZE_RESULT_ERROR_UNSUPPORTED_FEATURE;
+    ModuleBuildLog *moduleLinkLog = nullptr;
+    if (phLinkLog) {
+        moduleLinkLog = ModuleBuildLog::create();
+        *phLinkLog = moduleLinkLog->toHandle();
+    }
+    for (auto i = 0u; i < numModules; i++) {
+        auto moduleId = static_cast<ModuleImp *>(Module::fromHandle(phModules[i]));
+        if (moduleId->isFullyLinked) {
+            continue;
+        }
+        NEO::Linker::PatchableSegments isaSegmentsForPatching;
+        std::vector<std::vector<char>> patchedIsaTempStorage;
+        uint32_t numPatchedSymbols = 0u;
+        std::vector<std::string> unresolvedSymbolLogMessages;
+        if (moduleId->translationUnit->programInfo.linkerInput && moduleId->translationUnit->programInfo.linkerInput->getTraits().requiresPatchingOfInstructionSegments) {
+            patchedIsaTempStorage.reserve(moduleId->kernelImmDatas.size());
+            for (const auto &kernelInfo : moduleId->translationUnit->programInfo.kernelInfos) {
+                auto &kernHeapInfo = kernelInfo->heapInfo;
+                const char *originalIsa = reinterpret_cast<const char *>(kernHeapInfo.pKernelHeap);
+                patchedIsaTempStorage.push_back(std::vector<char>(originalIsa, originalIsa + kernHeapInfo.KernelHeapSize));
+                isaSegmentsForPatching.push_back(NEO::Linker::PatchableSegment{patchedIsaTempStorage.rbegin()->data(), kernHeapInfo.KernelHeapSize});
+            }
+            for (const auto &unresolvedExternal : moduleId->unresolvedExternalsInfo) {
+                if (moduleLinkLog) {
+                    std::stringstream logMessage;
+                    logMessage << "Module <" << moduleId << ">: "
+                               << " Unresolved Symbol <" << unresolvedExternal.unresolvedRelocation.symbolName << ">";
+                    unresolvedSymbolLogMessages.push_back(logMessage.str());
+                }
+                for (auto i = 0u; i < numModules; i++) {
+                    auto moduleHandle = static_cast<ModuleImp *>(Module::fromHandle(phModules[i]));
+                    auto symbolIt = moduleHandle->symbols.find(unresolvedExternal.unresolvedRelocation.symbolName);
+                    if (symbolIt != moduleHandle->symbols.end()) {
+                        auto relocAddress = ptrOffset(isaSegmentsForPatching[unresolvedExternal.instructionsSegmentId].hostPointer,
+                                                      static_cast<uintptr_t>(unresolvedExternal.unresolvedRelocation.offset));
+
+                        NEO::Linker::patchAddress(relocAddress, symbolIt->second, unresolvedExternal.unresolvedRelocation);
+                        numPatchedSymbols++;
+                        moduleId->importedSymbolAllocations.insert(moduleHandle->exportedFunctionsSurface);
+
+                        if (moduleLinkLog) {
+                            std::stringstream logMessage;
+                            logMessage << " Successfully Resolved Thru Dynamic Link to Module <" << moduleHandle << ">";
+                            unresolvedSymbolLogMessages.back().append(logMessage.str());
+                        }
+
+                        // Apply the exported functions surface state from the export module to the import module if it exists.
+                        // Enables import modules to access the exported functions during kernel execution.
+                        for (auto &kernImmData : moduleId->kernelImmDatas) {
+                            kernImmData->getResidencyContainer().reserve(kernImmData->getResidencyContainer().size() +
+                                                                         ((moduleHandle->exportedFunctionsSurface != nullptr) ? 1 : 0) + moduleId->importedSymbolAllocations.size());
+
+                            if (nullptr != moduleHandle->exportedFunctionsSurface) {
+                                kernImmData->getResidencyContainer().push_back(moduleHandle->exportedFunctionsSurface);
+                            }
+                            kernImmData->getResidencyContainer().insert(kernImmData->getResidencyContainer().end(), moduleId->importedSymbolAllocations.begin(),
+                                                                        moduleId->importedSymbolAllocations.end());
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        if (moduleLinkLog) {
+            for (int i = 0; i < (int)unresolvedSymbolLogMessages.size(); i++) {
+                moduleLinkLog->appendString(unresolvedSymbolLogMessages[i].c_str(), unresolvedSymbolLogMessages[i].size());
+            }
+        }
+        if (numPatchedSymbols != moduleId->unresolvedExternalsInfo.size()) {
+            return ZE_RESULT_ERROR_MODULE_LINK_FAILURE;
+        }
+        moduleId->copyPatchedSegments(isaSegmentsForPatching);
+        moduleId->isFullyLinked = true;
+    }
+    return ZE_RESULT_SUCCESS;
 }
 
-bool moveBuildOption(std::string &dstOptionsSet, std::string &srcOptionSet, ConstStringRef dstOptionName, ConstStringRef srcOptionName) {
+void ModuleImp::registerElfInDebuggerL0(NEO::Device *neoDevice) {
+    if (neoDevice->getDebugger() == nullptr) {
+        return;
+    }
+
+    auto refBin = ArrayRef<const uint8_t>(reinterpret_cast<const uint8_t *>(translationUnit->unpackedDeviceBinary.get()), translationUnit->unpackedDeviceBinarySize);
+    if (NEO::isDeviceBinaryFormat<NEO::DeviceBinaryFormat::Zebin>(refBin)) {
+        size_t debugDataSize = 0;
+        getDebugInfo(&debugDataSize, nullptr);
+        if (device->getL0Debugger()) {
+            NEO::DebugData debugData; // pass debug zebin in vIsa field
+            debugData.vIsa = reinterpret_cast<const char *>(translationUnit->debugData.get());
+            debugData.vIsaSize = static_cast<uint32_t>(translationUnit->debugDataSize);
+            device->getL0Debugger()->registerElf(&debugData, kernelImmDatas[0]->getIsaGraphicsAllocation());
+        }
+    } else {
+        for (auto &kernImmData : kernelImmDatas) {
+            if (kernImmData->getKernelInfo()->kernelDescriptor.external.debugData.get()) {
+                kernImmData->createRelocatedDebugData(translationUnit->globalConstBuffer, translationUnit->globalVarBuffer);
+                if (device->getL0Debugger()) {
+                    device->getL0Debugger()->registerElf(kernImmData->getKernelInfo()->kernelDescriptor.external.debugData.get(), kernImmData->getIsaGraphicsAllocation());
+                }
+            }
+        }
+    }
+}
+
+bool moveBuildOption(std::string &dstOptionsSet, std::string &srcOptionSet, NEO::ConstStringRef dstOptionName, NEO::ConstStringRef srcOptionName) {
+    const char optDelim = ' ';
+    const char valDelim = '=';
+
     auto optInSrcPos = srcOptionSet.find(srcOptionName.begin());
     if (std::string::npos == optInSrcPos) {
         return false;
     }
 
-    srcOptionSet.erase(optInSrcPos, srcOptionName.length());
-    NEO::CompilerOptions::concatenateAppend(dstOptionsSet, dstOptionName);
+    std::string dstOptionStr(dstOptionName);
+    auto optInSrcEndPos = srcOptionSet.find(optDelim, optInSrcPos);
+    if (srcOptionName == BuildOptions::optLevel) {
+        auto valInSrcPos = srcOptionSet.find(valDelim, optInSrcPos);
+        if (std::string::npos == valInSrcPos) {
+            return false;
+        }
+        dstOptionStr += srcOptionSet.substr(valInSrcPos + 1, optInSrcEndPos);
+    }
+    srcOptionSet.erase(optInSrcPos, (optInSrcEndPos - optInSrcPos));
+    NEO::CompilerOptions::concatenateAppend(dstOptionsSet, dstOptionStr);
     return true;
 }
 

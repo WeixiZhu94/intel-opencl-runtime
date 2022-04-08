@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019-2020 Intel Corporation
+ * Copyright (C) 2019-2022 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -7,10 +7,10 @@
 
 #include "opencl/test/unit_test/utilities/file_logger_tests.h"
 
-#include "shared/test/unit_test/helpers/debug_manager_state_restore.h"
+#include "shared/source/utilities/logger.h"
+#include "shared/test/common/helpers/debug_manager_state_restore.h"
 #include "shared/test/unit_test/utilities/base_object_utils.h"
 
-#include "opencl/source/utilities/logger.h"
 #include "opencl/test/unit_test/fixtures/buffer_fixture.h"
 #include "opencl/test/unit_test/fixtures/image_fixture.h"
 #include "opencl/test/unit_test/mocks/mock_buffer.h"
@@ -230,10 +230,11 @@ TEST(FileLogger, WhenGettingEventsThenCorrectValueIsReturned) {
     flags.LogApiCalls.set(true);
 
     FullyEnabledFileLogger fileLogger(testFile, flags);
+    FullyEnabledClFileLogger clFileLogger(fileLogger, flags);
     // getEvents returns string
     uintptr_t event = 8;
     uintptr_t *input[3] = {&event, &event, &event};
-    std::string eventsString = fileLogger.getEvents((uintptr_t *)input, 2);
+    std::string eventsString = clFileLogger.getEvents((uintptr_t *)input, 2);
     EXPECT_NE(0u, eventsString.size());
 }
 
@@ -242,8 +243,9 @@ TEST(FileLogger, GivenNullInputWhenGettingEventsThenZeroIsReturned) {
     DebugVariables flags;
 
     FullyEnabledFileLogger fileLogger(testFile, flags);
+    FullyEnabledClFileLogger clFileLogger(fileLogger, flags);
     // getEvents returns 0 sized string
-    std::string event = fileLogger.getEvents(nullptr, 2);
+    std::string event = clFileLogger.getEvents(nullptr, 2);
     EXPECT_EQ(0u, event.size());
 }
 
@@ -253,13 +255,14 @@ TEST(FileLogger, GivenLoggerWithDebugFunctionalityWhenGetMemObjectsIsCalledThenC
     flags.LogApiCalls.set(true);
 
     FullyEnabledFileLogger fileLogger(testFile, flags);
+    FullyEnabledClFileLogger clFileLogger(fileLogger, flags);
     MockBuffer buffer;
     MemObj *memoryObject = &buffer;
     cl_mem clMem = memoryObject;
     cl_mem clMemObjects[] = {clMem, clMem};
     cl_uint numObjects = 2;
 
-    std::string memObjectString = fileLogger.getMemObjects(reinterpret_cast<const uintptr_t *>(clMemObjects), numObjects);
+    std::string memObjectString = clFileLogger.getMemObjects(reinterpret_cast<const uintptr_t *>(clMemObjects), numObjects);
     EXPECT_NE(0u, memObjectString.size());
     std::stringstream output;
     output << "cl_mem " << clMem << ", MemObj " << memoryObject;
@@ -270,7 +273,8 @@ TEST(FileLogger, GivenDebugFunctionalityWhenGetMemObjectsIsCalledWithNullptrThen
     std::string testFile = "testfile";
     DebugVariables flags;
     FullyEnabledFileLogger fileLogger(testFile, flags);
-    std::string memObjectString = fileLogger.getMemObjects(nullptr, 2);
+    FullyEnabledClFileLogger clFileLogger(fileLogger, flags);
+    std::string memObjectString = clFileLogger.getMemObjects(nullptr, 2);
     EXPECT_EQ(0u, memObjectString.size());
 }
 
@@ -278,7 +282,8 @@ TEST(FileLogger, GiveDisabledDebugFunctionalityWhenGetMemObjectsIsCalledThenCall
     std::string testFile = "testfile";
     DebugVariables flags;
     FullyDisabledFileLogger fileLogger(testFile, flags);
-    std::string memObjectString = fileLogger.getMemObjects(nullptr, 2);
+    FullyDisabledClFileLogger clFileLogger(fileLogger, flags);
+    std::string memObjectString = clFileLogger.getMemObjects(nullptr, 2);
     EXPECT_EQ(0u, memObjectString.size());
 }
 
@@ -338,27 +343,22 @@ TEST(FileLogger, GivenNullMdiWhenDumpingKernelsThenFileIsNotCreated) {
     DebugVariables flags;
     flags.DumpKernelArgs.set(true);
     FullyEnabledFileLogger fileLogger(testFile, flags);
+    FullyEnabledClFileLogger clFileLogger(fileLogger, flags);
 
-    fileLogger.dumpKernelArgs((const MultiDispatchInfo *)nullptr);
+    clFileLogger.dumpKernelArgs(nullptr);
 
     EXPECT_EQ(fileLogger.createdFilesCount(), 0);
 }
 
 TEST(FileLogger, GivenDebugFunctionalityWhenDebugFlagIsDisabledThenDoNotDumpKernelArgsForMdi) {
-    auto kernelInfo = std::make_unique<KernelInfo>();
+    auto kernelInfo = std::make_unique<MockKernelInfo>();
+    kernelInfo->kernelDescriptor.kernelAttributes.simdSize = 1;
     auto device = std::make_unique<MockClDevice>(MockDevice::createWithNewExecutionEnvironment<MockDevice>(nullptr));
-    MockProgram program(*device->getExecutionEnvironment());
+    MockProgram program(toClDeviceVector(*device));
     auto kernel = std::unique_ptr<MockKernel>(new MockKernel(&program, *kernelInfo, *device));
-    auto multiDispatchInfo = std::unique_ptr<MockMultiDispatchInfo>(new MockMultiDispatchInfo(kernel.get()));
+    auto multiDispatchInfo = std::unique_ptr<MockMultiDispatchInfo>(new MockMultiDispatchInfo(device.get(), kernel.get()));
 
-    KernelArgPatchInfo kernelArgPatchInfo;
-
-    kernelArgPatchInfo.size = 32;
-    kernelArgPatchInfo.sourceOffset = 0;
-    kernelArgPatchInfo.crossthreadOffset = 32;
-
-    kernelInfo->kernelArgInfo.resize(1);
-    kernelInfo->kernelArgInfo[0].kernelArgPatchInfoVector.push_back(kernelArgPatchInfo);
+    kernelInfo->addArgImmediate(0, 32, 32);
 
     size_t crossThreadDataSize = 64;
     auto crossThreadData = std::unique_ptr<uint8_t>(new uint8_t[crossThreadDataSize]);
@@ -368,8 +368,9 @@ TEST(FileLogger, GivenDebugFunctionalityWhenDebugFlagIsDisabledThenDoNotDumpKern
     DebugVariables flags;
     flags.DumpKernelArgs.set(false);
     FullyEnabledFileLogger fileLogger(testFile, flags);
+    FullyEnabledClFileLogger clFileLogger(fileLogger, flags);
 
-    fileLogger.dumpKernelArgs(multiDispatchInfo.get());
+    clFileLogger.dumpKernelArgs(multiDispatchInfo.get());
 
     // check if file was created
     std::string expectedFile = "_arg_0_immediate_size_32_flags_0.bin";
@@ -380,20 +381,14 @@ TEST(FileLogger, GivenDebugFunctionalityWhenDebugFlagIsDisabledThenDoNotDumpKern
 }
 
 TEST(FileLogger, GivenMdiWhenDumpingKernelArgsThenFileIsCreated) {
-    auto kernelInfo = std::make_unique<KernelInfo>();
+    auto kernelInfo = std::make_unique<MockKernelInfo>();
+    kernelInfo->kernelDescriptor.kernelAttributes.simdSize = 1;
     auto device = std::make_unique<MockClDevice>(MockDevice::createWithNewExecutionEnvironment<MockDevice>(nullptr));
-    MockProgram program(*device->getExecutionEnvironment());
+    MockProgram program(toClDeviceVector(*device));
     auto kernel = std::unique_ptr<MockKernel>(new MockKernel(&program, *kernelInfo, *device));
-    auto multiDispatchInfo = std::unique_ptr<MockMultiDispatchInfo>(new MockMultiDispatchInfo(kernel.get()));
+    auto multiDispatchInfo = std::unique_ptr<MockMultiDispatchInfo>(new MockMultiDispatchInfo(device.get(), kernel.get()));
 
-    KernelArgPatchInfo kernelArgPatchInfo;
-
-    kernelArgPatchInfo.size = 32;
-    kernelArgPatchInfo.sourceOffset = 0;
-    kernelArgPatchInfo.crossthreadOffset = 32;
-
-    kernelInfo->kernelArgInfo.resize(1);
-    kernelInfo->kernelArgInfo[0].kernelArgPatchInfoVector.push_back(kernelArgPatchInfo);
+    kernelInfo->addArgImmediate(0, 32, 32);
 
     size_t crossThreadDataSize = 64;
     auto crossThreadData = std::unique_ptr<uint8_t>(new uint8_t[crossThreadDataSize]);
@@ -403,8 +398,9 @@ TEST(FileLogger, GivenMdiWhenDumpingKernelArgsThenFileIsCreated) {
     DebugVariables flags;
     flags.DumpKernelArgs.set(true);
     FullyEnabledFileLogger fileLogger(testFile, flags);
+    FullyEnabledClFileLogger clFileLogger(fileLogger, flags);
 
-    fileLogger.dumpKernelArgs(multiDispatchInfo.get());
+    clFileLogger.dumpKernelArgs(multiDispatchInfo.get());
 
     // check if file was created
     std::string expectedFile = "_arg_0_immediate_size_32_flags_0.bin";
@@ -419,41 +415,44 @@ TEST(FileLogger, GivenNullWhenDumpingKernelArgsThenFileIsNotCreated) {
     DebugVariables flags;
     flags.DumpKernelArgs.set(true);
     FullyEnabledFileLogger fileLogger(testFile, flags);
-    fileLogger.dumpKernelArgs((const Kernel *)nullptr);
+    FullyEnabledClFileLogger clFileLogger(fileLogger, flags);
+
+    auto device = std::make_unique<MockClDevice>(MockDevice::createWithNewExecutionEnvironment<MockDevice>(nullptr));
+    auto multiDispatchInfo = std::unique_ptr<MockMultiDispatchInfo>(new MockMultiDispatchInfo(device.get(), nullptr));
+    clFileLogger.dumpKernelArgs(multiDispatchInfo.get());
 
     EXPECT_EQ(fileLogger.createdFilesCount(), 0);
 }
 
 TEST(FileLogger, GivenEmptyKernelWhenDumpingKernelArgsThenFileIsNotCreated) {
     auto kernelInfo = std::make_unique<KernelInfo>();
+    kernelInfo->kernelDescriptor.kernelAttributes.simdSize = 1;
     auto device = std::make_unique<MockClDevice>(MockDevice::createWithNewExecutionEnvironment<MockDevice>(nullptr));
-    MockProgram program(*device->getExecutionEnvironment());
+    MockProgram program(toClDeviceVector(*device));
     auto kernel = std::unique_ptr<MockKernel>(new MockKernel(&program, *kernelInfo, *device));
+    auto multiDispatchInfo = std::unique_ptr<MockMultiDispatchInfo>(new MockMultiDispatchInfo(device.get(), kernel.get()));
 
     std::string testFile = "testfile";
     DebugVariables flags;
     flags.DumpKernelArgs.set(true);
     FullyEnabledFileLogger fileLogger(testFile, flags);
+    FullyEnabledClFileLogger clFileLogger(fileLogger, flags);
 
-    fileLogger.dumpKernelArgs(kernel.get());
+    clFileLogger.dumpKernelArgs(multiDispatchInfo.get());
 
     EXPECT_EQ(fileLogger.createdFilesCount(), 0);
 }
 
 TEST(FileLogger, GivenImmediateWhenDumpingKernelArgsThenFileIsCreated) {
-    auto kernelInfo = std::make_unique<KernelInfo>();
+    auto kernelInfo = std::make_unique<MockKernelInfo>();
+    kernelInfo->kernelDescriptor.kernelAttributes.simdSize = 1;
+
     auto device = std::make_unique<MockClDevice>(MockDevice::createWithNewExecutionEnvironment<MockDevice>(nullptr));
-    MockProgram program(*device->getExecutionEnvironment());
+    MockProgram program(toClDeviceVector(*device));
     auto kernel = std::unique_ptr<MockKernel>(new MockKernel(&program, *kernelInfo, *device));
+    auto multiDispatchInfo = std::unique_ptr<MockMultiDispatchInfo>(new MockMultiDispatchInfo(device.get(), kernel.get()));
 
-    KernelArgPatchInfo kernelArgPatchInfo;
-
-    kernelArgPatchInfo.size = 32;
-    kernelArgPatchInfo.sourceOffset = 0;
-    kernelArgPatchInfo.crossthreadOffset = 32;
-
-    kernelInfo->kernelArgInfo.resize(1);
-    kernelInfo->kernelArgInfo[0].kernelArgPatchInfoVector.push_back(kernelArgPatchInfo);
+    kernelInfo->addArgImmediate(0, 32, 32);
 
     size_t crossThreadDataSize = 64;
     auto crossThreadData = std::unique_ptr<uint8_t>(new uint8_t[crossThreadDataSize]);
@@ -463,8 +462,9 @@ TEST(FileLogger, GivenImmediateWhenDumpingKernelArgsThenFileIsCreated) {
     DebugVariables flags;
     flags.DumpKernelArgs.set(true);
     FullyEnabledFileLogger fileLogger(testFile, flags);
+    FullyEnabledClFileLogger clFileLogger(fileLogger, flags);
 
-    fileLogger.dumpKernelArgs(kernel.get());
+    clFileLogger.dumpKernelArgs(multiDispatchInfo.get());
 
     // check if file was created
     EXPECT_TRUE(fileLogger.wasFileCreated("_arg_0_immediate_size_32_flags_0.bin"));
@@ -474,20 +474,14 @@ TEST(FileLogger, GivenImmediateWhenDumpingKernelArgsThenFileIsCreated) {
 }
 
 TEST(FileLogger, GivenImmediateZeroSizeWhenDumpingKernelArgsThenFileIsNotCreated) {
-
-    auto kernelInfo = std::make_unique<KernelInfo>();
+    auto kernelInfo = std::make_unique<MockKernelInfo>();
+    kernelInfo->kernelDescriptor.kernelAttributes.simdSize = 1;
     auto device = std::make_unique<MockClDevice>(MockDevice::createWithNewExecutionEnvironment<MockDevice>(nullptr));
-    MockProgram program(*device->getExecutionEnvironment());
+    MockProgram program(toClDeviceVector(*device));
     auto kernel = std::unique_ptr<MockKernel>(new MockKernel(&program, *kernelInfo, *device));
+    auto multiDispatchInfo = std::unique_ptr<MockMultiDispatchInfo>(new MockMultiDispatchInfo(device.get(), kernel.get()));
 
-    KernelArgPatchInfo kernelArgPatchInfo;
-
-    kernelArgPatchInfo.size = 0;
-    kernelArgPatchInfo.sourceOffset = 0;
-    kernelArgPatchInfo.crossthreadOffset = 32;
-
-    kernelInfo->kernelArgInfo.resize(1);
-    kernelInfo->kernelArgInfo[0].kernelArgPatchInfoVector.push_back(kernelArgPatchInfo);
+    kernelInfo->addArgImmediate(0, 0, 32);
 
     size_t crossThreadDataSize = sizeof(64);
     auto crossThreadData = std::unique_ptr<uint8_t>(new uint8_t[crossThreadDataSize]);
@@ -497,48 +491,46 @@ TEST(FileLogger, GivenImmediateZeroSizeWhenDumpingKernelArgsThenFileIsNotCreated
     DebugVariables flags;
     flags.DumpKernelArgs.set(true);
     FullyEnabledFileLogger fileLogger(testFile, flags);
-    fileLogger.dumpKernelArgs(kernel.get());
+    FullyEnabledClFileLogger clFileLogger(fileLogger, flags);
+    clFileLogger.dumpKernelArgs(multiDispatchInfo.get());
 
     // no files should be created for zero size
     EXPECT_EQ(fileLogger.createdFilesCount(), 0);
 }
 
 TEST(FileLogger, GivenLocalBufferWhenDumpingKernelArgsThenFileIsNotCreated) {
-
-    auto kernelInfo = std::make_unique<KernelInfo>();
+    auto kernelInfo = std::make_unique<MockKernelInfo>();
+    kernelInfo->kernelDescriptor.kernelAttributes.simdSize = 1;
     auto device = std::make_unique<MockClDevice>(MockDevice::createWithNewExecutionEnvironment<MockDevice>(nullptr));
-    MockProgram program(*device->getExecutionEnvironment());
+    MockProgram program(toClDeviceVector(*device));
     auto kernel = std::unique_ptr<MockKernel>(new MockKernel(&program, *kernelInfo, *device));
+    auto multiDispatchInfo = std::unique_ptr<MockMultiDispatchInfo>(new MockMultiDispatchInfo(device.get(), kernel.get()));
 
-    KernelArgPatchInfo kernelArgPatchInfo;
-
-    kernelInfo->kernelArgInfo.resize(1);
-    kernelInfo->kernelArgInfo[0].kernelArgPatchInfoVector.push_back(kernelArgPatchInfo);
-    kernelInfo->kernelArgInfo[0].metadata.addressQualifier = KernelArgMetadata::AddrLocal;
+    kernelInfo->addArgBuffer(0);
+    kernelInfo->setAddressQualifier(0, KernelArgMetadata::AddrLocal);
 
     std::string testFile = "testfile";
     DebugVariables flags;
     flags.DumpKernelArgs.set(true);
     FullyEnabledFileLogger fileLogger(testFile, flags);
-    fileLogger.dumpKernelArgs(kernel.get());
+    FullyEnabledClFileLogger clFileLogger(fileLogger, flags);
+    clFileLogger.dumpKernelArgs(multiDispatchInfo.get());
 
     // no files should be created for local buffer
     EXPECT_EQ(fileLogger.createdFilesCount(), 0);
 }
 
 TEST(FileLogger, GivenBufferNotSetWhenDumpingKernelArgsThenFileIsNotCreated) {
-    auto kernelInfo = std::make_unique<KernelInfo>();
+    auto kernelInfo = std::make_unique<MockKernelInfo>();
+    kernelInfo->kernelDescriptor.kernelAttributes.simdSize = 1;
     auto device = std::make_unique<MockClDevice>(MockDevice::createWithNewExecutionEnvironment<MockDevice>(nullptr));
     auto context = clUniquePtr(new MockContext(device.get()));
-    auto program = clUniquePtr(new MockProgram(*device->getExecutionEnvironment(), context.get(), false, &device->getDevice()));
-    auto kernel = clUniquePtr(new MockKernel(program.get(), *kernelInfo, *device));
+    auto program = clUniquePtr(new MockProgram(context.get(), false, toClDeviceVector(*device)));
+    auto kernel = std::make_unique<MockKernel>(program.get(), *kernelInfo, *device);
+    auto multiDispatchInfo = std::unique_ptr<MockMultiDispatchInfo>(new MockMultiDispatchInfo(device.get(), kernel.get()));
 
-    KernelArgPatchInfo kernelArgPatchInfo;
-
-    kernelInfo->kernelArgInfo.resize(1);
-    kernelInfo->kernelArgInfo[0].metadataExtended = std::make_unique<NEO::ArgTypeMetadataExtended>();
-    kernelInfo->kernelArgInfo[0].kernelArgPatchInfoVector.push_back(kernelArgPatchInfo);
-    kernelInfo->kernelArgInfo[0].metadataExtended->type = "uint8 *buffer";
+    kernelInfo->addArgBuffer(0);
+    kernelInfo->addExtendedMetadata(0, "", "uint8 *buffer");
 
     kernel->initialize();
 
@@ -550,8 +542,9 @@ TEST(FileLogger, GivenBufferNotSetWhenDumpingKernelArgsThenFileIsNotCreated) {
     DebugVariables flags;
     flags.DumpKernelArgs.set(true);
     FullyEnabledFileLogger fileLogger(testFile, flags);
+    FullyEnabledClFileLogger clFileLogger(fileLogger, flags);
 
-    fileLogger.dumpKernelArgs(kernel.get());
+    clFileLogger.dumpKernelArgs(multiDispatchInfo.get());
 
     // no files should be created for local buffer
     EXPECT_EQ(fileLogger.createdFilesCount(), 0);
@@ -563,17 +556,14 @@ TEST(FileLogger, GivenBufferWhenDumpingKernelArgsThenFileIsCreated) {
     auto buffer = BufferHelper<>::create(context.get());
     cl_mem clObj = buffer;
 
-    auto kernelInfo = std::make_unique<KernelInfo>();
-    auto program = clUniquePtr(new MockProgram(*device->getExecutionEnvironment(), context.get(), false, &device->getDevice()));
-    auto kernel = clUniquePtr(new MockKernel(program.get(), *kernelInfo, *device));
+    auto kernelInfo = std::make_unique<MockKernelInfo>();
+    kernelInfo->kernelDescriptor.kernelAttributes.simdSize = 1;
+    auto program = clUniquePtr(new MockProgram(context.get(), false, toClDeviceVector(*device)));
+    auto kernel = std::make_unique<MockKernel>(program.get(), *kernelInfo, *device);
+    auto multiDispatchInfo = std::unique_ptr<MockMultiDispatchInfo>(new MockMultiDispatchInfo(device.get(), kernel.get()));
 
-    KernelArgPatchInfo kernelArgPatchInfo;
-
-    kernelInfo->kernelArgInfo.resize(1);
-    kernelInfo->kernelArgInfo[0].metadataExtended = std::make_unique<NEO::ArgTypeMetadataExtended>();
-    kernelInfo->kernelArgInfo[0].kernelArgPatchInfoVector.push_back(kernelArgPatchInfo);
-    kernelInfo->kernelArgInfo[0].metadataExtended->type = "uint8 *buffer";
-    kernelInfo->kernelArgInfo.at(0).isBuffer = true;
+    kernelInfo->addArgBuffer(0);
+    kernelInfo->addExtendedMetadata(0, "", "uint8 *buffer");
 
     kernel->initialize();
 
@@ -587,8 +577,9 @@ TEST(FileLogger, GivenBufferWhenDumpingKernelArgsThenFileIsCreated) {
     DebugVariables flags;
     flags.DumpKernelArgs.set(true);
     FullyEnabledFileLogger fileLogger(testFile, flags);
+    FullyEnabledClFileLogger clFileLogger(fileLogger, flags);
 
-    fileLogger.dumpKernelArgs(kernel.get());
+    clFileLogger.dumpKernelArgs(multiDispatchInfo.get());
 
     buffer->release();
 
@@ -600,18 +591,16 @@ TEST(FileLogger, GivenBufferWhenDumpingKernelArgsThenFileIsCreated) {
 }
 
 TEST(FileLogger, GivenSamplerWhenDumpingKernelArgsThenFileIsNotCreated) {
-    auto kernelInfo = std::make_unique<KernelInfo>();
+    auto kernelInfo = std::make_unique<MockKernelInfo>();
+    kernelInfo->kernelDescriptor.kernelAttributes.simdSize = 1;
     auto device = std::make_unique<MockClDevice>(MockDevice::createWithNewExecutionEnvironment<MockDevice>(nullptr));
     auto context = clUniquePtr(new MockContext(device.get()));
-    auto program = clUniquePtr(new MockProgram(*device->getExecutionEnvironment(), context.get(), false, &device->getDevice()));
-    auto kernel = clUniquePtr(new MockKernel(program.get(), *kernelInfo, *device));
+    auto program = clUniquePtr(new MockProgram(context.get(), false, toClDeviceVector(*device)));
+    auto kernel = std::make_unique<MockKernel>(program.get(), *kernelInfo, *device);
+    auto multiDispatchInfo = std::unique_ptr<MockMultiDispatchInfo>(new MockMultiDispatchInfo(device.get(), kernel.get()));
 
-    KernelArgPatchInfo kernelArgPatchInfo;
-
-    kernelInfo->kernelArgInfo.resize(1);
-    kernelInfo->kernelArgInfo[0].metadataExtended = std::make_unique<NEO::ArgTypeMetadataExtended>();
-    kernelInfo->kernelArgInfo[0].kernelArgPatchInfoVector.push_back(kernelArgPatchInfo);
-    kernelInfo->kernelArgInfo[0].metadataExtended->type = "sampler test";
+    kernelInfo->addArgSampler(0);
+    kernelInfo->addExtendedMetadata(0, "", "sampler test");
 
     kernel->initialize();
 
@@ -619,34 +608,30 @@ TEST(FileLogger, GivenSamplerWhenDumpingKernelArgsThenFileIsNotCreated) {
     DebugVariables flags;
     flags.DumpKernelArgs.set(true);
     FullyEnabledFileLogger fileLogger(testFile, flags);
+    FullyEnabledClFileLogger clFileLogger(fileLogger, flags);
 
-    fileLogger.dumpKernelArgs(kernel.get());
+    clFileLogger.dumpKernelArgs(multiDispatchInfo.get());
 
     // no files should be created for sampler arg
     EXPECT_EQ(fileLogger.createdFilesCount(), 0);
 }
 
 TEST(FileLogger, GivenImageNotSetWhenDumpingKernelArgsThenFileIsNotCreated) {
-
-    auto kernelInfo = std::make_unique<KernelInfo>();
+    auto kernelInfo = std::make_unique<MockKernelInfo>();
+    kernelInfo->kernelDescriptor.kernelAttributes.simdSize = 1;
     auto device = std::make_unique<MockClDevice>(MockDevice::createWithNewExecutionEnvironment<MockDevice>(nullptr));
     auto context = clUniquePtr(new MockContext(device.get()));
-    auto program = clUniquePtr(new MockProgram(*device->getExecutionEnvironment(), context.get(), false, &device->getDevice()));
-    auto kernel = clUniquePtr(new MockKernel(program.get(), *kernelInfo, *device));
+    auto program = clUniquePtr(new MockProgram(context.get(), false, toClDeviceVector(*device)));
+    auto kernel = std::make_unique<MockKernel>(program.get(), *kernelInfo, *device);
+    auto multiDispatchInfo = std::unique_ptr<MockMultiDispatchInfo>(new MockMultiDispatchInfo(device.get(), kernel.get()));
 
     char surfaceStateHeap[0x80];
     kernelInfo->heapInfo.pSsh = surfaceStateHeap;
     kernelInfo->heapInfo.SurfaceStateHeapSize = sizeof(surfaceStateHeap);
-    kernelInfo->usesSsh = true;
 
-    KernelArgPatchInfo kernelArgPatchInfo;
-
-    kernelInfo->kernelArgInfo.resize(1);
-    kernelInfo->kernelArgInfo[0].metadataExtended = std::make_unique<NEO::ArgTypeMetadataExtended>();
-    kernelInfo->kernelArgInfo[0].kernelArgPatchInfoVector.push_back(kernelArgPatchInfo);
-    kernelInfo->kernelArgInfo[0].metadataExtended->type = "image2d buffer";
-    kernelInfo->kernelArgInfo[0].isImage = true;
-    kernelInfo->kernelArgInfo[0].offsetImgWidth = 0x4;
+    kernelInfo->addArgImage(0);
+    kernelInfo->argAsImg(0).metadataPayload.imgWidth = 0x4;
+    kernelInfo->addExtendedMetadata(0, "", "image2d buffer");
 
     kernel->initialize();
 
@@ -658,8 +643,9 @@ TEST(FileLogger, GivenImageNotSetWhenDumpingKernelArgsThenFileIsNotCreated) {
     DebugVariables flags;
     flags.DumpKernelArgs.set(true);
     FullyEnabledFileLogger fileLogger(testFile, flags);
+    FullyEnabledClFileLogger clFileLogger(fileLogger, flags);
 
-    fileLogger.dumpKernelArgs(kernel.get());
+    clFileLogger.dumpKernelArgs(multiDispatchInfo.get());
 
     // no files should be created for local buffer
     EXPECT_EQ(fileLogger.createdFilesCount(), 0);
@@ -694,6 +680,7 @@ TEST(FileLogger, GivenDisabledDebugFunctionalityWhenLoggingThenDumpingDoesNotOcc
     flags.LogApiCalls.set(true);
     flags.DumpKernelArgs.set(true);
     FullyDisabledFileLogger fileLogger(testFile, flags);
+    FullyDisabledClFileLogger clFileLogger(fileLogger, flags);
 
     // Should not be enabled without debug functionality
     EXPECT_FALSE(fileLogger.enabled());
@@ -721,7 +708,7 @@ TEST(FileLogger, GivenDisabledDebugFunctionalityWhenLoggingThenDumpingDoesNotOcc
     EXPECT_EQ(0u, output);
 
     // getEvents returns 0-size string
-    std::string event = fileLogger.getEvents(&input, 0);
+    std::string event = clFileLogger.getEvents(&input, 0);
     EXPECT_EQ(0u, event.size());
 
     // getSizes returns 0-size string
@@ -738,7 +725,25 @@ TEST(FileLogger, GivenDisabledDebugFunctionalityWhenLoggingThenDumpingDoesNotOcc
     fileLogger.dumpBinaryProgram(1, &length, &ptrBinary);
     EXPECT_FALSE(fileLogger.wasFileCreated(programDumpFile));
 
-    fileLogger.dumpKernelArgs((const Kernel *)nullptr);
+    auto kernelInfo = std::make_unique<MockKernelInfo>();
+    kernelInfo->kernelDescriptor.kernelAttributes.simdSize = 1;
+    auto device = std::make_unique<MockClDevice>(MockDevice::createWithNewExecutionEnvironment<MockDevice>(nullptr));
+    auto context = clUniquePtr(new MockContext(device.get()));
+    auto program = clUniquePtr(new MockProgram(context.get(), false, toClDeviceVector(*device)));
+    auto kernel = std::make_unique<MockKernel>(program.get(), *kernelInfo, *device);
+    auto multiDispatchInfo = std::unique_ptr<MockMultiDispatchInfo>(new MockMultiDispatchInfo(device.get(), kernel.get()));
+
+    kernelInfo->addArgBuffer(0);
+    kernelInfo->addExtendedMetadata(0, "", "uint8 *buffer");
+
+    kernel->initialize();
+
+    size_t crossThreadDataSize = sizeof(void *);
+    auto crossThreadData = std::unique_ptr<uint8_t>(new uint8_t[crossThreadDataSize]);
+    kernel->setCrossThreadData(crossThreadData.get(), static_cast<uint32_t>(crossThreadDataSize));
+
+    kernel->setArg(0, nullptr);
+    clFileLogger.dumpKernelArgs(multiDispatchInfo.get());
 
     // test api input logging
     fileLogger.logInputs("Arg name", "value");
@@ -895,11 +900,9 @@ struct AllocationTypeTestCase {
 
 AllocationTypeTestCase allocationTypeValues[] = {
     {GraphicsAllocation::AllocationType::BUFFER, "BUFFER"},
-    {GraphicsAllocation::AllocationType::BUFFER_COMPRESSED, "BUFFER_COMPRESSED"},
     {GraphicsAllocation::AllocationType::BUFFER_HOST_MEMORY, "BUFFER_HOST_MEMORY"},
     {GraphicsAllocation::AllocationType::COMMAND_BUFFER, "COMMAND_BUFFER"},
     {GraphicsAllocation::AllocationType::CONSTANT_SURFACE, "CONSTANT_SURFACE"},
-    {GraphicsAllocation::AllocationType::DEVICE_QUEUE_BUFFER, "DEVICE_QUEUE_BUFFER"},
     {GraphicsAllocation::AllocationType::EXTERNAL_HOST_PTR, "EXTERNAL_HOST_PTR"},
     {GraphicsAllocation::AllocationType::FILL_PATTERN, "FILL_PATTERN"},
     {GraphicsAllocation::AllocationType::GLOBAL_SURFACE, "GLOBAL_SURFACE"},
@@ -909,6 +912,7 @@ AllocationTypeTestCase allocationTypeValues[] = {
     {GraphicsAllocation::AllocationType::INTERNAL_HEAP, "INTERNAL_HEAP"},
     {GraphicsAllocation::AllocationType::INTERNAL_HOST_MEMORY, "INTERNAL_HOST_MEMORY"},
     {GraphicsAllocation::AllocationType::KERNEL_ISA, "KERNEL_ISA"},
+    {GraphicsAllocation::AllocationType::KERNEL_ISA_INTERNAL, "KERNEL_ISA_INTERNAL"},
     {GraphicsAllocation::AllocationType::LINEAR_STREAM, "LINEAR_STREAM"},
     {GraphicsAllocation::AllocationType::MAP_ALLOCATION, "MAP_ALLOCATION"},
     {GraphicsAllocation::AllocationType::MCS, "MCS"},
@@ -918,6 +922,7 @@ AllocationTypeTestCase allocationTypeValues[] = {
     {GraphicsAllocation::AllocationType::PRIVATE_SURFACE, "PRIVATE_SURFACE"},
     {GraphicsAllocation::AllocationType::PROFILING_TAG_BUFFER, "PROFILING_TAG_BUFFER"},
     {GraphicsAllocation::AllocationType::SCRATCH_SURFACE, "SCRATCH_SURFACE"},
+    {GraphicsAllocation::AllocationType::WORK_PARTITION_SURFACE, "WORK_PARTITION_SURFACE"},
     {GraphicsAllocation::AllocationType::SHARED_BUFFER, "SHARED_BUFFER"},
     {GraphicsAllocation::AllocationType::SHARED_CONTEXT_IMAGE, "SHARED_CONTEXT_IMAGE"},
     {GraphicsAllocation::AllocationType::SHARED_IMAGE, "SHARED_IMAGE"},
@@ -932,7 +937,9 @@ AllocationTypeTestCase allocationTypeValues[] = {
     {GraphicsAllocation::AllocationType::UNKNOWN, "UNKNOWN"},
     {GraphicsAllocation::AllocationType::WRITE_COMBINED, "WRITE_COMBINED"},
     {GraphicsAllocation::AllocationType::DEBUG_CONTEXT_SAVE_AREA, "DEBUG_CONTEXT_SAVE_AREA"},
-    {GraphicsAllocation::AllocationType::DEBUG_SBA_TRACKING_BUFFER, "DEBUG_SBA_TRACKING_BUFFER"}};
+    {GraphicsAllocation::AllocationType::DEBUG_SBA_TRACKING_BUFFER, "DEBUG_SBA_TRACKING_BUFFER"},
+    {GraphicsAllocation::AllocationType::DEBUG_MODULE_AREA, "DEBUG_MODULE_AREA"},
+    {GraphicsAllocation::AllocationType::SW_TAG_BUFFER, "SW_TAG_BUFFER"}};
 
 class AllocationTypeLogging : public ::testing::TestWithParam<AllocationTypeTestCase> {};
 
@@ -944,7 +951,7 @@ TEST_P(AllocationTypeLogging, givenGraphicsAllocationTypeWhenConvertingToStringT
 
     GraphicsAllocation graphicsAllocation(0, input.type, nullptr, 0ull, 0ull, 0, MemoryPool::MemoryNull);
 
-    auto result = fileLogger.getAllocationTypeString(&graphicsAllocation);
+    auto result = getAllocationTypeString(&graphicsAllocation);
 
     EXPECT_STREQ(result, input.str);
 }
@@ -960,19 +967,70 @@ TEST(AllocationTypeLoggingSingle, givenGraphicsAllocationTypeWhenConvertingToStr
 
     GraphicsAllocation graphicsAllocation(0, static_cast<GraphicsAllocation::AllocationType>(999), nullptr, 0ull, 0ull, 0, MemoryPool::MemoryNull);
 
-    auto result = fileLogger.getAllocationTypeString(&graphicsAllocation);
+    auto result = getAllocationTypeString(&graphicsAllocation);
 
     EXPECT_STREQ(result, "ILLEGAL_VALUE");
 }
 
-TEST(AllocationTypeLoggingSingle, givenDisabledDebugFunctionalityWhenGettingGraphicsAllocationTypeThenNullptrReturned) {
+TEST(AllocationTypeLoggingSingle, givenAllocationTypeWhenConvertingToStringThenSupportAll) {
     std::string testFile = "testfile";
     DebugVariables flags;
-    FullyDisabledFileLogger fileLogger(testFile, flags);
+    FullyEnabledFileLogger fileLogger(testFile, flags);
 
-    GraphicsAllocation graphicsAllocation(0, GraphicsAllocation::AllocationType::BUFFER, nullptr, 0ull, 0ull, 0, MemoryPool::MemoryNull);
+    GraphicsAllocation graphicsAllocation(0, GraphicsAllocation::AllocationType::UNKNOWN, nullptr, 0ull, 0ull, 0, MemoryPool::MemoryNull);
 
-    auto result = fileLogger.getAllocationTypeString(&graphicsAllocation);
+    for (uint32_t i = 0; i < static_cast<uint32_t>(GraphicsAllocation::AllocationType::COUNT); i++) {
+        graphicsAllocation.setAllocationType(static_cast<GraphicsAllocation::AllocationType>(i));
 
-    EXPECT_STREQ(result, nullptr);
+        auto result = getAllocationTypeString(&graphicsAllocation);
+
+        EXPECT_STRNE(result, "ILLEGAL_VALUE");
+    }
+}
+
+TEST(AllocationTypeLoggingSingle, givenDebugVariableToCaptureAllocationTypeWhenFunctionIsCalledThenProperAllocationTypeIsPrinted) {
+    std::string testFile = "testfile";
+    DebugVariables flags;
+    flags.LogAllocationType.set(1);
+
+    FullyEnabledFileLogger fileLogger(testFile, flags);
+
+    GraphicsAllocation graphicsAllocation(0, GraphicsAllocation::AllocationType::COMMAND_BUFFER, nullptr, 0ull, 0ull, 0, MemoryPool::MemoryNull);
+
+    testing::internal::CaptureStdout();
+    fileLogger.logAllocation(&graphicsAllocation);
+
+    std::string output = testing::internal::GetCapturedStdout();
+    std::string expectedOutput = "Created Graphics Allocation of type COMMAND_BUFFER\n";
+
+    EXPECT_STREQ(output.c_str(), expectedOutput.c_str());
+}
+
+TEST(AllocationTypeLoggingSingle, givenLogAllocationTypeWhenLoggingAllocationThenTypeIsLoggedToFile) {
+    std::string testFile = "testfile";
+    DebugVariables flags;
+    flags.LogAllocationType.set(1);
+
+    FullyEnabledFileLogger fileLogger(testFile, flags);
+
+    GraphicsAllocation graphicsAllocation(0, GraphicsAllocation::AllocationType::COMMAND_BUFFER, nullptr, 0ull, 0ull, 0, MemoryPool::MemoryNull);
+
+    // Log file not created
+    bool logFileCreated = fileExists(fileLogger.getLogFileName());
+    EXPECT_FALSE(logFileCreated);
+
+    testing::internal::CaptureStdout();
+    fileLogger.logAllocation(&graphicsAllocation);
+
+    std::string output = testing::internal::GetCapturedStdout();
+    std::string expectedOutput = "Created Graphics Allocation of type COMMAND_BUFFER\n";
+
+    EXPECT_STREQ(output.c_str(), expectedOutput.c_str());
+
+    if (fileLogger.wasFileCreated(fileLogger.getLogFileName())) {
+        auto str = fileLogger.getFileString(fileLogger.getLogFileName());
+        EXPECT_TRUE(str.find("AllocationType: ") != std::string::npos);
+    } else {
+        EXPECT_FALSE(true);
+    }
 }

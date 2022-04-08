@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2022 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -106,13 +106,10 @@ cl_int CommandQueueHw<GfxFamily>::enqueueSVMMap(cl_bool blockingMap,
             return CL_SUCCESS;
         }
 
-        MultiDispatchInfo dispatchInfo;
-        auto &builder = BuiltInDispatchBuilderOp::getBuiltinDispatchInfoBuilder(EBuiltInOps::CopyBufferToBuffer,
-                                                                                this->getDevice());
-        BuiltInOwnershipWrapper builtInLock(builder, this->context);
+        CsrSelectionArgs csrSelectionArgs{CL_COMMAND_READ_BUFFER, &svmData->gpuAllocations, {}, device->getRootDeviceIndex(), &size};
+        CommandStreamReceiver &csr = selectCsrForBuiltinOperation(csrSelectionArgs);
 
         auto gpuAllocation = svmData->gpuAllocations.getGraphicsAllocation(getDevice().getRootDeviceIndex());
-
         GeneralSurface dstSurface(svmData->cpuAllocation);
         GeneralSurface srcSurface(gpuAllocation);
 
@@ -129,15 +126,10 @@ cl_int CommandQueueHw<GfxFamily>::enqueueSVMMap(cl_bool blockingMap,
         dc.srcOffset = {svmOffset, 0, 0};
         dc.size = {size, 0, 0};
         dc.unifiedMemoryArgsRequireMemSync = externalAppCall;
-        builder.buildDispatchInfos(dispatchInfo, dc);
 
-        enqueueHandler<CL_COMMAND_READ_BUFFER>(
-            surfaces,
-            blocking,
-            dispatchInfo,
-            numEventsInWaitList,
-            eventWaitList,
-            event);
+        MultiDispatchInfo dispatchInfo(dc);
+        dispatchBcsOrGpgpuEnqueue<CL_COMMAND_READ_BUFFER>(dispatchInfo, surfaces, EBuiltInOps::CopyBufferToBuffer, numEventsInWaitList, eventWaitList, event, blocking, csr);
+
         if (event) {
             castToObjectOrAbort<Event>(*event)->setCmdType(CL_COMMAND_SVM_MAP);
         }
@@ -198,15 +190,12 @@ cl_int CommandQueueHw<GfxFamily>::enqueueSVMUnmap(void *svmPtr,
             return CL_SUCCESS;
         }
 
-        auto gpuAllocation = svmData->gpuAllocations.getGraphicsAllocation(getDevice().getRootDeviceIndex());
+        CsrSelectionArgs csrSelectionArgs{CL_COMMAND_READ_BUFFER, {}, &svmData->gpuAllocations, device->getRootDeviceIndex(), &svmOperation->regionSize};
+        CommandStreamReceiver &csr = selectCsrForBuiltinOperation(csrSelectionArgs);
 
+        auto gpuAllocation = svmData->gpuAllocations.getGraphicsAllocation(getDevice().getRootDeviceIndex());
         gpuAllocation->setAubWritable(true, GraphicsAllocation::defaultBank);
         gpuAllocation->setTbxWritable(true, GraphicsAllocation::defaultBank);
-
-        MultiDispatchInfo dispatchInfo;
-        auto &builder = BuiltInDispatchBuilderOp::getBuiltinDispatchInfoBuilder(EBuiltInOps::CopyBufferToBuffer,
-                                                                                this->getDevice());
-        BuiltInOwnershipWrapper builtInLock(builder, this->context);
 
         GeneralSurface dstSurface(gpuAllocation);
         GeneralSurface srcSurface(svmData->cpuAllocation);
@@ -222,15 +211,10 @@ cl_int CommandQueueHw<GfxFamily>::enqueueSVMUnmap(void *svmPtr,
         dc.srcOffset = {svmOperation->offset, 0, 0};
         dc.size = {svmOperation->regionSize, 0, 0};
         dc.unifiedMemoryArgsRequireMemSync = externalAppCall;
-        builder.buildDispatchInfos(dispatchInfo, dc);
 
-        enqueueHandler<CL_COMMAND_READ_BUFFER>(
-            surfaces,
-            false,
-            dispatchInfo,
-            numEventsInWaitList,
-            eventWaitList,
-            event);
+        MultiDispatchInfo dispatchInfo(dc);
+        dispatchBcsOrGpgpuEnqueue<CL_COMMAND_READ_BUFFER>(dispatchInfo, surfaces, EBuiltInOps::CopyBufferToBuffer, numEventsInWaitList, eventWaitList, event, false, csr);
+
         if (event) {
             castToObjectOrAbort<Event>(*event)->setCmdType(CL_COMMAND_SVM_UNMAP);
         }
@@ -290,6 +274,24 @@ inline void setOperationParams(BuiltinOpParams &operationParams, size_t size,
     operationParams.dstOffset = {ptrDiff(dstPtr, operationParams.dstPtr), 0, 0};
 }
 
+template <typename PtrType>
+inline std::tuple<SvmAllocationData *, GraphicsAllocation *, PtrType> getExistingAlloc(Context *context,
+                                                                                       PtrType ptr,
+                                                                                       size_t size,
+                                                                                       uint32_t rootDeviceIndex) {
+    SvmAllocationData *svmData = context->getSVMAllocsManager()->getSVMAlloc(ptr);
+    GraphicsAllocation *allocation = nullptr;
+    if (svmData) {
+        allocation = svmData->gpuAllocations.getGraphicsAllocation(rootDeviceIndex);
+    } else {
+        context->tryGetExistingMapAllocation(ptr, size, allocation);
+        if (allocation) {
+            ptr = CommandQueue::convertAddressWithOffsetToGpuVa(ptr, InternalMemoryType::NOT_SPECIFIED, *allocation);
+        }
+    }
+    return std::make_tuple(svmData, allocation, ptr);
+}
+
 template <typename GfxFamily>
 cl_int CommandQueueHw<GfxFamily>::enqueueSVMMemcpy(cl_bool blockingCopy,
                                                    void *dstPtr,
@@ -303,28 +305,28 @@ cl_int CommandQueueHw<GfxFamily>::enqueueSVMMemcpy(cl_bool blockingCopy,
         return CL_INVALID_VALUE;
     }
     auto rootDeviceIndex = getDevice().getRootDeviceIndex();
-    auto dstSvmData = context->getSVMAllocsManager()->getSVMAlloc(dstPtr);
-    auto srcSvmData = context->getSVMAllocsManager()->getSVMAlloc(srcPtr);
+    auto [dstSvmData, dstAllocation, dstGpuPtr] = getExistingAlloc(context, dstPtr, size, rootDeviceIndex);
+    auto [srcSvmData, srcAllocation, srcGpuPtr] = getExistingAlloc(context, srcPtr, size, rootDeviceIndex);
 
     enum CopyType { HostToHost,
                     SvmToHost,
                     HostToSvm,
                     SvmToSvm };
     CopyType copyType = HostToHost;
-    if ((srcSvmData != nullptr) && (dstSvmData != nullptr)) {
+    if ((srcAllocation != nullptr) && (dstAllocation != nullptr)) {
         copyType = SvmToSvm;
-    } else if ((srcSvmData == nullptr) && (dstSvmData != nullptr)) {
+    } else if ((srcAllocation == nullptr) && (dstAllocation != nullptr)) {
         copyType = HostToSvm;
-    } else if (srcSvmData != nullptr) {
+    } else if (srcAllocation != nullptr) {
         copyType = SvmToHost;
     }
 
     auto pageFaultManager = context->getMemoryManager()->getPageFaultManager();
     if (dstSvmData && pageFaultManager) {
-        pageFaultManager->moveAllocationToGpuDomain(reinterpret_cast<void *>(dstSvmData->gpuAllocations.getGraphicsAllocation(rootDeviceIndex)->getGpuAddress()));
+        pageFaultManager->moveAllocationToGpuDomain(reinterpret_cast<void *>(dstAllocation->getGpuAddress()));
     }
     if (srcSvmData && pageFaultManager) {
-        pageFaultManager->moveAllocationToGpuDomain(reinterpret_cast<void *>(srcSvmData->gpuAllocations.getGraphicsAllocation(rootDeviceIndex)->getGpuAddress()));
+        pageFaultManager->moveAllocationToGpuDomain(reinterpret_cast<void *>(srcAllocation->getGpuAddress()));
     }
 
     auto isStatelessRequired = false;
@@ -340,102 +342,88 @@ cl_int CommandQueueHw<GfxFamily>::enqueueSVMMemcpy(cl_bool blockingCopy,
         builtInType = EBuiltInOps::CopyBufferToBufferStateless;
     }
 
-    auto &builder = BuiltInDispatchBuilderOp::getBuiltinDispatchInfoBuilder(builtInType,
-                                                                            this->getDevice());
-    BuiltInOwnershipWrapper builtInLock(builder, this->context);
     MultiDispatchInfo dispatchInfo;
     BuiltinOpParams operationParams;
     Surface *surfaces[2];
     cl_command_type cmdType;
 
     if (copyType == SvmToHost) {
-        GeneralSurface srcSvmSurf(srcSvmData->gpuAllocations.getGraphicsAllocation(rootDeviceIndex));
-        HostPtrSurface dstHostPtrSurf(dstPtr, size);
-        cmdType = CL_COMMAND_READ_BUFFER;
+        CsrSelectionArgs csrSelectionArgs{CL_COMMAND_SVM_MEMCPY, srcAllocation, {}, device->getRootDeviceIndex(), &size};
+        CommandStreamReceiver &csr = selectCsrForBuiltinOperation(csrSelectionArgs);
+
+        GeneralSurface srcSvmSurf(srcAllocation);
+        HostPtrSurface dstHostPtrSurf(dstGpuPtr, size);
         if (size != 0) {
-            auto &csr = getCommandStreamReceiverByCommandType(cmdType);
             bool status = csr.createAllocationForHostSurface(dstHostPtrSurf, true);
             if (!status) {
                 return CL_OUT_OF_RESOURCES;
             }
-            dstPtr = reinterpret_cast<void *>(dstHostPtrSurf.getAllocation()->getGpuAddress());
+            dstGpuPtr = reinterpret_cast<void *>(dstHostPtrSurf.getAllocation()->getGpuAddress());
+            notifyEnqueueSVMMemcpy(srcAllocation, !!blockingCopy, EngineHelpers::isBcs(csr.getOsContext().getEngineType()));
         }
-        setOperationParams(operationParams, size, srcPtr, srcSvmData->gpuAllocations.getGraphicsAllocation(rootDeviceIndex), dstPtr, dstHostPtrSurf.getAllocation());
+        setOperationParams(operationParams, size, srcGpuPtr, srcAllocation, dstGpuPtr, dstHostPtrSurf.getAllocation());
         surfaces[0] = &srcSvmSurf;
         surfaces[1] = &dstHostPtrSurf;
-        builder.buildDispatchInfos(dispatchInfo, operationParams);
-        enqueueHandler<CL_COMMAND_READ_BUFFER>(
-            surfaces,
-            blockingCopy == CL_TRUE,
-            dispatchInfo,
-            numEventsInWaitList,
-            eventWaitList,
-            event);
+
+        dispatchInfo.setBuiltinOpParams(operationParams);
+        dispatchBcsOrGpgpuEnqueue<CL_COMMAND_READ_BUFFER>(dispatchInfo, surfaces, builtInType, numEventsInWaitList, eventWaitList, event, blockingCopy, csr);
+
     } else if (copyType == HostToSvm) {
-        HostPtrSurface srcHostPtrSurf(const_cast<void *>(srcPtr), size);
-        GeneralSurface dstSvmSurf(dstSvmData->gpuAllocations.getGraphicsAllocation(rootDeviceIndex));
+        CsrSelectionArgs csrSelectionArgs{CL_COMMAND_SVM_MEMCPY, {}, dstAllocation, device->getRootDeviceIndex(), &size};
+        CommandStreamReceiver &csr = selectCsrForBuiltinOperation(csrSelectionArgs);
+
+        HostPtrSurface srcHostPtrSurf(const_cast<void *>(srcGpuPtr), size, true);
+        GeneralSurface dstSvmSurf(dstAllocation);
         cmdType = CL_COMMAND_WRITE_BUFFER;
         if (size != 0) {
-            auto &csr = getCommandStreamReceiverByCommandType(cmdType);
             bool status = csr.createAllocationForHostSurface(srcHostPtrSurf, false);
             if (!status) {
                 return CL_OUT_OF_RESOURCES;
             }
-            srcPtr = reinterpret_cast<void *>(srcHostPtrSurf.getAllocation()->getGpuAddress());
+            srcGpuPtr = reinterpret_cast<void *>(srcHostPtrSurf.getAllocation()->getGpuAddress());
         }
-        setOperationParams(operationParams, size, srcPtr, srcHostPtrSurf.getAllocation(),
-                           dstPtr, dstSvmData->gpuAllocations.getGraphicsAllocation(rootDeviceIndex));
+        setOperationParams(operationParams, size, srcGpuPtr, srcHostPtrSurf.getAllocation(), dstGpuPtr, dstAllocation);
         surfaces[0] = &dstSvmSurf;
         surfaces[1] = &srcHostPtrSurf;
-        builder.buildDispatchInfos(dispatchInfo, operationParams);
-        enqueueHandler<CL_COMMAND_WRITE_BUFFER>(
-            surfaces,
-            blockingCopy == CL_TRUE,
-            dispatchInfo,
-            numEventsInWaitList,
-            eventWaitList,
-            event);
+
+        dispatchInfo.setBuiltinOpParams(operationParams);
+        dispatchBcsOrGpgpuEnqueue<CL_COMMAND_WRITE_BUFFER>(dispatchInfo, surfaces, builtInType, numEventsInWaitList, eventWaitList, event, blockingCopy, csr);
+
     } else if (copyType == SvmToSvm) {
-        GeneralSurface srcSvmSurf(srcSvmData->gpuAllocations.getGraphicsAllocation(rootDeviceIndex));
-        GeneralSurface dstSvmSurf(dstSvmData->gpuAllocations.getGraphicsAllocation(rootDeviceIndex));
-        setOperationParams(operationParams, size, srcPtr, srcSvmData->gpuAllocations.getGraphicsAllocation(rootDeviceIndex),
-                           dstPtr, dstSvmData->gpuAllocations.getGraphicsAllocation(rootDeviceIndex));
+        CsrSelectionArgs csrSelectionArgs{CL_COMMAND_SVM_MEMCPY, srcAllocation, dstAllocation, device->getRootDeviceIndex(), &size};
+        CommandStreamReceiver &csr = selectCsrForBuiltinOperation(csrSelectionArgs);
+
+        GeneralSurface srcSvmSurf(srcAllocation);
+        GeneralSurface dstSvmSurf(dstAllocation);
+        setOperationParams(operationParams, size, srcGpuPtr, srcAllocation, dstGpuPtr, dstAllocation);
         surfaces[0] = &srcSvmSurf;
         surfaces[1] = &dstSvmSurf;
-        builder.buildDispatchInfos(dispatchInfo, operationParams);
-        enqueueHandler<CL_COMMAND_SVM_MEMCPY>(
-            surfaces,
-            blockingCopy ? true : false,
-            dispatchInfo,
-            numEventsInWaitList,
-            eventWaitList,
-            event);
+
+        dispatchInfo.setBuiltinOpParams(operationParams);
+        dispatchBcsOrGpgpuEnqueue<CL_COMMAND_SVM_MEMCPY>(dispatchInfo, surfaces, builtInType, numEventsInWaitList, eventWaitList, event, blockingCopy, csr);
+
     } else {
-        HostPtrSurface srcHostPtrSurf(const_cast<void *>(srcPtr), size);
-        HostPtrSurface dstHostPtrSurf(dstPtr, size);
+        CsrSelectionArgs csrSelectionArgs{CL_COMMAND_SVM_MEMCPY, &size};
+        CommandStreamReceiver &csr = selectCsrForBuiltinOperation(csrSelectionArgs);
+
+        HostPtrSurface srcHostPtrSurf(const_cast<void *>(srcGpuPtr), size);
+        HostPtrSurface dstHostPtrSurf(dstGpuPtr, size);
         cmdType = CL_COMMAND_WRITE_BUFFER;
         if (size != 0) {
-            auto &csr = getCommandStreamReceiverByCommandType(cmdType);
             bool status = csr.createAllocationForHostSurface(srcHostPtrSurf, false);
             status &= csr.createAllocationForHostSurface(dstHostPtrSurf, true);
             if (!status) {
                 return CL_OUT_OF_RESOURCES;
             }
-            srcPtr = reinterpret_cast<void *>(srcHostPtrSurf.getAllocation()->getGpuAddress());
-            dstPtr = reinterpret_cast<void *>(dstHostPtrSurf.getAllocation()->getGpuAddress());
+            srcGpuPtr = reinterpret_cast<void *>(srcHostPtrSurf.getAllocation()->getGpuAddress());
+            dstGpuPtr = reinterpret_cast<void *>(dstHostPtrSurf.getAllocation()->getGpuAddress());
         }
-        setOperationParams(operationParams, size, srcPtr, srcHostPtrSurf.getAllocation(), dstPtr, dstHostPtrSurf.getAllocation());
+        setOperationParams(operationParams, size, srcGpuPtr, srcHostPtrSurf.getAllocation(), dstGpuPtr, dstHostPtrSurf.getAllocation());
         surfaces[0] = &srcHostPtrSurf;
         surfaces[1] = &dstHostPtrSurf;
 
-        builder.buildDispatchInfos(dispatchInfo, operationParams);
-        enqueueHandler<CL_COMMAND_WRITE_BUFFER>(
-            surfaces,
-            blockingCopy ? true : false,
-            dispatchInfo,
-            numEventsInWaitList,
-            eventWaitList,
-            event);
+        dispatchInfo.setBuiltinOpParams(operationParams);
+        dispatchBcsOrGpgpuEnqueue<CL_COMMAND_WRITE_BUFFER>(dispatchInfo, surfaces, builtInType, numEventsInWaitList, eventWaitList, event, blockingCopy, csr);
     }
     if (event) {
         auto pEvent = castToObjectOrAbort<Event>(*event);
@@ -493,7 +481,7 @@ cl_int CommandQueueHw<GfxFamily>::enqueueSVMMemFill(void *svmPtr,
     }
 
     auto &builder = BuiltInDispatchBuilderOp::getBuiltinDispatchInfoBuilder(builtInType,
-                                                                            this->getDevice());
+                                                                            this->getClDevice());
 
     BuiltInOwnershipWrapper builtInLock(builder, this->context);
 
@@ -513,8 +501,8 @@ cl_int CommandQueueHw<GfxFamily>::enqueueSVMMemFill(void *svmPtr,
     operationParams.dstOffset = {dstPtrOffset, 0, 0};
     operationParams.size = {size, 0, 0};
 
-    MultiDispatchInfo dispatchInfo;
-    builder.buildDispatchInfos(dispatchInfo, operationParams);
+    MultiDispatchInfo dispatchInfo(operationParams);
+    builder.buildDispatchInfos(dispatchInfo);
 
     GeneralSurface s1(gpuAllocation);
     GeneralSurface s2(patternAllocation);
@@ -544,12 +532,12 @@ cl_int CommandQueueHw<GfxFamily>::enqueueSVMMigrateMem(cl_uint numSvmPointers,
     NullSurface s;
     Surface *surfaces[] = {&s};
 
-    enqueueHandler<CL_COMMAND_MIGRATE_MEM_OBJECTS>(surfaces,
-                                                   false,
-                                                   MultiDispatchInfo(),
-                                                   numEventsInWaitList,
-                                                   eventWaitList,
-                                                   event);
+    enqueueHandler<CL_COMMAND_SVM_MIGRATE_MEM>(surfaces,
+                                               false,
+                                               MultiDispatchInfo(),
+                                               numEventsInWaitList,
+                                               eventWaitList,
+                                               event);
 
     return CL_SUCCESS;
 }

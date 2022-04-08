@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -8,25 +8,27 @@
 #include "shared/source/built_ins/built_ins.h"
 #include "shared/source/gmm_helper/gmm_helper.h"
 #include "shared/source/helpers/cache_policy.h"
+#include "shared/source/helpers/local_memory_access_modes.h"
 #include "shared/source/memory_manager/allocations_list.h"
-#include "shared/test/unit_test/helpers/debug_manager_state_restore.h"
+#include "shared/test/common/helpers/debug_manager_state_restore.h"
+#include "shared/test/common/helpers/unit_test_helper.h"
+#include "shared/test/common/mocks/mock_execution_environment.h"
+#include "shared/test/common/test_macros/test.h"
+#include "shared/test/unit_test/utilities/base_object_utils.h"
 
 #include "opencl/source/built_ins/builtins_dispatch_builder.h"
 #include "opencl/source/helpers/dispatch_info.h"
 #include "opencl/test/unit_test/command_queue/enqueue_fixture.h"
 #include "opencl/test/unit_test/command_queue/enqueue_read_buffer_fixture.h"
 #include "opencl/test/unit_test/gen_common/gen_commands_common_validation.h"
-#include "opencl/test/unit_test/helpers/unit_test_helper.h"
 #include "opencl/test/unit_test/mocks/mock_buffer.h"
 #include "opencl/test/unit_test/mocks/mock_command_queue.h"
-#include "opencl/test/unit_test/mocks/mock_execution_environment.h"
-#include "test.h"
 
 #include "reg_configs_common.h"
 
 using namespace NEO;
 
-HWTEST_F(EnqueueReadBufferTypeTest, null_mem_object) {
+HWTEST_F(EnqueueReadBufferTypeTest, GivenNullBufferWhenReadingBufferThenInvalidMemObjectErrorIsReturned) {
     auto data = 1;
     auto retVal = clEnqueueReadBuffer(
         pCmdQ,
@@ -42,7 +44,7 @@ HWTEST_F(EnqueueReadBufferTypeTest, null_mem_object) {
     EXPECT_EQ(CL_INVALID_MEM_OBJECT, retVal);
 }
 
-HWTEST_F(EnqueueReadBufferTypeTest, null_user_pointer) {
+HWTEST_F(EnqueueReadBufferTypeTest, GivenNullUserPointerWhenReadingBufferThenInvalidValueErrorIsReturned) {
     auto data = 1;
 
     auto retVal = clEnqueueReadBuffer(
@@ -59,7 +61,7 @@ HWTEST_F(EnqueueReadBufferTypeTest, null_user_pointer) {
     EXPECT_EQ(CL_INVALID_VALUE, retVal);
 }
 
-HWCMDTEST_F(IGFX_GEN8_CORE, EnqueueReadBufferTypeTest, GPGPUWalker) {
+HWCMDTEST_F(IGFX_GEN8_CORE, EnqueueReadBufferTypeTest, WhenReadingBufferThenGpgpuWalkerIsProgrammedCorrectly) {
     typedef typename FamilyType::GPGPU_WALKER GPGPU_WALKER;
 
     srcBuffer->forceDisallowCPUCopy = true;
@@ -80,7 +82,8 @@ HWCMDTEST_F(IGFX_GEN8_CORE, EnqueueReadBufferTypeTest, GPGPUWalker) {
 
     // Compute the SIMD lane mask
     size_t simd =
-        cmd->getSimdSize() == GPGPU_WALKER::SIMD_SIZE_SIMD32 ? 32 : cmd->getSimdSize() == GPGPU_WALKER::SIMD_SIZE_SIMD16 ? 16 : 8;
+        cmd->getSimdSize() == GPGPU_WALKER::SIMD_SIZE_SIMD32 ? 32 : cmd->getSimdSize() == GPGPU_WALKER::SIMD_SIZE_SIMD16 ? 16
+                                                                                                                         : 8;
     uint64_t simdMask = maxNBitValue(simd);
 
     // Mask off lanes based on the execution masks
@@ -92,7 +95,7 @@ HWCMDTEST_F(IGFX_GEN8_CORE, EnqueueReadBufferTypeTest, GPGPUWalker) {
     }
 }
 
-HWTEST_F(EnqueueReadBufferTypeTest, bumpsTaskLevel) {
+HWTEST_F(EnqueueReadBufferTypeTest, WhenReadingBufferThenTaskLevelIsIncremented) {
     auto taskLevelBefore = pCmdQ->taskLevel;
 
     srcBuffer->forceDisallowCPUCopy = true;
@@ -100,7 +103,7 @@ HWTEST_F(EnqueueReadBufferTypeTest, bumpsTaskLevel) {
     EXPECT_GT(pCmdQ->taskLevel, taskLevelBefore);
 }
 
-HWTEST_F(EnqueueReadBufferTypeTest, alignsToCSR_Blocking) {
+HWTEST_F(EnqueueReadBufferTypeTest, GivenBlockingWhenReadingBufferThenAlignedToCsr) {
     //this test case assumes IOQ
     auto &csr = pDevice->getUltCommandStreamReceiver<FamilyType>();
     csr.taskCount = pCmdQ->taskCount + 100;
@@ -113,7 +116,7 @@ HWTEST_F(EnqueueReadBufferTypeTest, alignsToCSR_Blocking) {
     EXPECT_EQ(oldCsrTaskLevel, pCmdQ->taskLevel);
 }
 
-HWTEST_F(EnqueueReadBufferTypeTest, alignsToCSR_NonBlocking) {
+HWTEST_F(EnqueueReadBufferTypeTest, GivenNonBlockingWhenReadingBufferThenAlignedToCsr) {
     //this test case assumes IOQ
     auto &csr = pDevice->getUltCommandStreamReceiver<FamilyType>();
     csr.taskCount = pCmdQ->taskCount + 100;
@@ -124,7 +127,7 @@ HWTEST_F(EnqueueReadBufferTypeTest, alignsToCSR_NonBlocking) {
     EXPECT_EQ(csr.peekTaskLevel(), pCmdQ->taskLevel + 1);
 }
 
-HWTEST_F(EnqueueReadBufferTypeTest, addsCommands) {
+HWTEST_F(EnqueueReadBufferTypeTest, WhenReadingBufferThenCommandsAreAdded) {
     auto usedCmdBufferBefore = pCS->getUsed();
 
     srcBuffer->forceDisallowCPUCopy = true;
@@ -132,7 +135,7 @@ HWTEST_F(EnqueueReadBufferTypeTest, addsCommands) {
     EXPECT_NE(usedCmdBufferBefore, pCS->getUsed());
 }
 
-HWTEST_F(EnqueueReadBufferTypeTest, addsIndirectData) {
+HWTEST_F(EnqueueReadBufferTypeTest, WhenReadingBufferThenIndirectDataIsAdded) {
     auto dshBefore = pDSH->getUsed();
     auto iohBefore = pIOH->getUsed();
     auto sshBefore = pSSH->getUsed();
@@ -140,9 +143,8 @@ HWTEST_F(EnqueueReadBufferTypeTest, addsIndirectData) {
     srcBuffer->forceDisallowCPUCopy = true;
     EnqueueReadBufferHelper<>::enqueueReadBuffer(pCmdQ, srcBuffer.get(), CL_TRUE);
 
-    MultiDispatchInfo multiDispatchInfo;
     auto &builder = BuiltInDispatchBuilderOp::getBuiltinDispatchInfoBuilder(EBuiltInOps::CopyBufferToBuffer,
-                                                                            pCmdQ->getDevice());
+                                                                            pCmdQ->getClDevice());
     ASSERT_NE(nullptr, &builder);
 
     BuiltinOpParams dc;
@@ -150,19 +152,22 @@ HWTEST_F(EnqueueReadBufferTypeTest, addsIndirectData) {
     dc.srcMemObj = srcBuffer.get();
     dc.srcOffset = {EnqueueReadBufferTraits::offset, 0, 0};
     dc.size = {srcBuffer->getSize(), 0, 0};
-    builder.buildDispatchInfos(multiDispatchInfo, dc);
+
+    MultiDispatchInfo multiDispatchInfo(dc);
+    builder.buildDispatchInfos(multiDispatchInfo);
     EXPECT_NE(0u, multiDispatchInfo.size());
 
     auto kernel = multiDispatchInfo.begin()->getKernel();
+    auto kernelDescriptor = &kernel->getKernelInfo().kernelDescriptor;
 
-    EXPECT_TRUE(UnitTestHelper<FamilyType>::evaluateDshUsage(dshBefore, pDSH->getUsed(), kernel));
+    EXPECT_TRUE(UnitTestHelper<FamilyType>::evaluateDshUsage(dshBefore, pDSH->getUsed(), kernelDescriptor, rootDeviceIndex));
     EXPECT_NE(iohBefore, pIOH->getUsed());
-    if (kernel->requiresSshForBuffers()) {
+    if (kernel->usesBindfulAddressingForBuffers()) {
         EXPECT_NE(sshBefore, pSSH->getUsed());
     }
 }
 
-HWTEST_F(EnqueueReadBufferTypeTest, LoadRegisterImmediateL3CNTLREG) {
+HWTEST_F(EnqueueReadBufferTypeTest, WhenReadingBufferThenLoadRegisterImmediateL3CntlregIsCorrect) {
     srcBuffer->forceDisallowCPUCopy = true;
     enqueueReadBuffer<FamilyType>();
     validateL3Programming<FamilyType>(cmdList, itorWalker);
@@ -172,11 +177,15 @@ HWCMDTEST_F(IGFX_GEN8_CORE, EnqueueReadBufferTypeTest, WhenEnqueueIsDoneThenStat
     srcBuffer->forceDisallowCPUCopy = true;
     enqueueReadBuffer<FamilyType>();
     auto &ultCsr = this->pDevice->getUltCommandStreamReceiver<FamilyType>();
+
+    auto &hwHelper = HwHelper::get(pDevice->getHardwareInfo().platform.eRenderCoreFamily);
+
     validateStateBaseAddress<FamilyType>(ultCsr.getMemoryManager()->getInternalHeapBaseAddress(ultCsr.rootDeviceIndex, pIOH->getGraphicsAllocation()->isAllocatedInLocalMemoryPool()),
+                                         ultCsr.getMemoryManager()->getInternalHeapBaseAddress(ultCsr.rootDeviceIndex, !hwHelper.useSystemMemoryPlacementForISA(pDevice->getHardwareInfo())),
                                          pDSH, pIOH, pSSH, itorPipelineSelect, itorWalker, cmdList, 0llu);
 }
 
-HWCMDTEST_F(IGFX_GEN8_CORE, EnqueueReadBufferTypeTest, MediaInterfaceDescriptorLoad) {
+HWCMDTEST_F(IGFX_GEN8_CORE, EnqueueReadBufferTypeTest, WhenReadingBufferThenMediaInterfaceDescriptorLoadIsCorrect) {
     typedef typename FamilyType::MEDIA_INTERFACE_DESCRIPTOR_LOAD MEDIA_INTERFACE_DESCRIPTOR_LOAD;
     typedef typename FamilyType::INTERFACE_DESCRIPTOR_DATA INTERFACE_DESCRIPTOR_DATA;
 
@@ -205,7 +214,7 @@ HWCMDTEST_F(IGFX_GEN8_CORE, EnqueueReadBufferTypeTest, MediaInterfaceDescriptorL
     FamilyType::PARSE::template validateCommand<MEDIA_INTERFACE_DESCRIPTOR_LOAD *>(cmdList.begin(), itorCmd);
 }
 
-HWCMDTEST_F(IGFX_GEN8_CORE, EnqueueReadBufferTypeTest, InterfaceDescriptorData) {
+HWCMDTEST_F(IGFX_GEN8_CORE, EnqueueReadBufferTypeTest, WhenReadingBufferThenInterfaceDescriptorDataIsCorrect) {
     typedef typename FamilyType::MEDIA_INTERFACE_DESCRIPTOR_LOAD MEDIA_INTERFACE_DESCRIPTOR_LOAD;
     typedef typename FamilyType::STATE_BASE_ADDRESS STATE_BASE_ADDRESS;
     typedef typename FamilyType::INTERFACE_DESCRIPTOR_DATA INTERFACE_DESCRIPTOR_DATA;
@@ -243,20 +252,20 @@ HWCMDTEST_F(IGFX_GEN8_CORE, EnqueueReadBufferTypeTest, InterfaceDescriptorData) 
     EXPECT_NE(0u, IDD.getConstantIndirectUrbEntryReadLength());
 }
 
-HWTEST_F(EnqueueReadBufferTypeTest, PipelineSelect) {
+HWTEST_F(EnqueueReadBufferTypeTest, WhenReadingBufferThenPipelineSelectIsProgrammedOnce) {
     srcBuffer->forceDisallowCPUCopy = true;
     enqueueReadBuffer<FamilyType>();
     int numCommands = getNumberOfPipelineSelectsThatEnablePipelineSelect<FamilyType>();
     EXPECT_EQ(1, numCommands);
 }
 
-HWCMDTEST_F(IGFX_GEN8_CORE, EnqueueReadBufferTypeTest, MediaVFEState) {
+HWCMDTEST_F(IGFX_GEN8_CORE, EnqueueReadBufferTypeTest, WhenReadingBufferThenMediaVfeStateIsCorrect) {
     srcBuffer->forceDisallowCPUCopy = true;
     enqueueReadBuffer<FamilyType>();
     validateMediaVFEState<FamilyType>(&pDevice->getHardwareInfo(), cmdMediaVfeState, cmdList, itorMediaVfeState);
 }
 
-HWCMDTEST_F(IGFX_GEN8_CORE, EnqueueReadBufferTypeTest, blockingRequiresPipeControlAfterWalkerWithDCFlushSet) {
+HWCMDTEST_F(IGFX_GEN8_CORE, EnqueueReadBufferTypeTest, GivenBlockingWhenReadingBufferThenPipeControlAfterWalkerWithDcFlushSetIsAdded) {
     typedef typename FamilyType::PIPE_CONTROL PIPE_CONTROL;
 
     srcBuffer->forceDisallowCPUCopy = true;
@@ -552,6 +561,7 @@ HWTEST_F(EnqueueReadBufferTypeTest, givenEnqueueReadBufferCalledWhenLockedPtrInT
 HWTEST_F(EnqueueReadBufferTypeTest, givenForcedCpuCopyWhenEnqueueReadCompressedBufferThenDontCopyOnCpu) {
     DebugManagerStateRestore dbgRestore;
     DebugManager.flags.DoCpuCopyOnReadBuffer.set(1);
+    DebugManager.flags.ForceLocalMemoryAccessMode.set(static_cast<int32_t>(LocalMemoryAccessMode::Default));
 
     MockExecutionEnvironment executionEnvironment(defaultHwInfo.get());
     MockMemoryManager memoryManager(false, true, executionEnvironment);
@@ -563,7 +573,8 @@ HWTEST_F(EnqueueReadBufferTypeTest, givenForcedCpuCopyWhenEnqueueReadCompressedB
     auto graphicsAllocation = buffer->getGraphicsAllocation(pClDevice->getRootDeviceIndex());
     static_cast<MemoryAllocation *>(graphicsAllocation)->overrideMemoryPool(MemoryPool::SystemCpuInaccessible);
     void *ptr = nonZeroCopyBuffer->getCpuAddressForMemoryTransfer();
-    graphicsAllocation->setAllocationType(GraphicsAllocation::AllocationType::BUFFER_COMPRESSED);
+
+    MockBuffer::setAllocationType(graphicsAllocation, pDevice->getRootDeviceEnvironment().getGmmClientContext(), true);
 
     retVal = mockCmdQ->enqueueReadBuffer(buffer.get(),
                                          CL_TRUE,
@@ -579,7 +590,7 @@ HWTEST_F(EnqueueReadBufferTypeTest, givenForcedCpuCopyWhenEnqueueReadCompressedB
     EXPECT_FALSE(graphicsAllocation->isLocked());
     EXPECT_FALSE(mockCmdQ->cpuDataTransferHandlerCalled);
 
-    graphicsAllocation->setAllocationType(GraphicsAllocation::AllocationType::BUFFER);
+    MockBuffer::setAllocationType(graphicsAllocation, pDevice->getRootDeviceEnvironment().getGmmClientContext(), false);
 
     retVal = mockCmdQ->enqueueReadBuffer(buffer.get(),
                                          CL_TRUE,
@@ -596,7 +607,7 @@ HWTEST_F(EnqueueReadBufferTypeTest, givenForcedCpuCopyWhenEnqueueReadCompressedB
     EXPECT_TRUE(mockCmdQ->cpuDataTransferHandlerCalled);
 }
 
-HWTEST_F(EnqueueReadBufferTypeTest, gicenEnqueueReadBufferCalledWhenLockedPtrInTransferPropertisIsNotAvailableThenItIsNotUnlocked) {
+HWTEST_F(EnqueueReadBufferTypeTest, givenEnqueueReadBufferCalledWhenLockedPtrInTransferPropertisIsNotAvailableThenItIsNotUnlocked) {
     DebugManagerStateRestore dbgRestore;
     DebugManager.flags.DoCpuCopyOnReadBuffer.set(1);
 
@@ -691,7 +702,7 @@ struct EnqueueReadBufferHw : public ::testing::Test {
         if (is32bit) {
             GTEST_SKIP();
         }
-        device = std::make_unique<MockClDevice>(MockDevice::createWithNewExecutionEnvironment<MockDevice>(defaultHwInfo.get()));
+        device = std::make_unique<MockClDevice>(MockClDevice::createWithNewExecutionEnvironment<MockDevice>(defaultHwInfo.get()));
         context.reset(new MockContext(device.get()));
     }
 
@@ -702,9 +713,9 @@ struct EnqueueReadBufferHw : public ::testing::Test {
     uint64_t smallSize = 4ull * MemoryConstants::gigaByte - 1;
 };
 
-using EnqeueReadBufferStatelessTest = EnqueueReadBufferHw;
+using EnqueueReadBufferStatelessTest = EnqueueReadBufferHw;
 
-HWTEST_F(EnqeueReadBufferStatelessTest, WhenReadingBufferStatelessThenSuccessIsReturned) {
+HWTEST_F(EnqueueReadBufferStatelessTest, WhenReadingBufferStatelessThenSuccessIsReturned) {
 
     auto pCmdQ = std::make_unique<CommandQueueStateless<FamilyType>>(context.get(), device.get());
     void *missAlignedPtr = reinterpret_cast<void *>(0x1041);
@@ -722,9 +733,9 @@ HWTEST_F(EnqeueReadBufferStatelessTest, WhenReadingBufferStatelessThenSuccessIsR
     EXPECT_EQ(CL_SUCCESS, retVal);
 }
 
-using EnqeueReadBufferStatefulTest = EnqueueReadBufferHw;
+using EnqueueReadBufferStatefulTest = EnqueueReadBufferHw;
 
-HWTEST_F(EnqeueReadBufferStatefulTest, WhenReadingBufferStatefulThenSuccessIsReturned) {
+HWTEST_F(EnqueueReadBufferStatefulTest, WhenReadingBufferStatefulThenSuccessIsReturned) {
 
     auto pCmdQ = std::make_unique<CommandQueueStateful<FamilyType>>(context.get(), device.get());
     void *missAlignedPtr = reinterpret_cast<void *>(0x1041);
@@ -740,4 +751,38 @@ HWTEST_F(EnqeueReadBufferStatefulTest, WhenReadingBufferStatefulThenSuccessIsRet
                                            nullptr);
 
     EXPECT_EQ(CL_SUCCESS, retVal);
+}
+
+HWTEST_F(EnqueueReadBufferHw, givenHostPtrIsFromMappedBufferWhenReadBufferIsCalledThenReuseGraphicsAllocation) {
+    DebugManagerStateRestore restore{};
+    DebugManager.flags.DisableZeroCopyForBuffers.set(1);
+    DebugManager.flags.DoCpuCopyOnReadBuffer.set(0);
+
+    MockCommandQueueHw<FamilyType> queue(context.get(), device.get(), nullptr);
+    auto &csr = device->getUltCommandStreamReceiver<FamilyType>();
+
+    BufferDefaults::context = context.get();
+    auto bufferForMap = clUniquePtr(BufferHelper<>::create());
+    auto bufferForRead = clUniquePtr(BufferHelper<>::create());
+
+    cl_int retVal{};
+    void *mappedPtr = queue.enqueueMapBuffer(bufferForMap.get(), CL_TRUE, CL_MAP_READ, 0, bufferForMap->getSize(), 0, nullptr, nullptr, retVal);
+    EXPECT_EQ(CL_SUCCESS, retVal);
+    EXPECT_NE(nullptr, mappedPtr);
+    EXPECT_EQ(0u, csr.createAllocationForHostSurfaceCalled);
+
+    MapOperationsHandler *mapOperationsHandler = context->getMapOperationsStorage().getHandlerIfExists(bufferForMap.get());
+    EXPECT_NE(nullptr, mapOperationsHandler);
+    MapInfo mapInfo{};
+    EXPECT_TRUE(mapOperationsHandler->find(mappedPtr, mapInfo));
+    EXPECT_NE(nullptr, mapInfo.graphicsAllocation);
+
+    auto unmappedPtr = std::make_unique<char[]>(bufferForRead->getSize());
+    retVal = queue.enqueueReadBuffer(bufferForRead.get(), CL_TRUE, 0, bufferForRead->getSize(), unmappedPtr.get(), nullptr, 0, 0, nullptr);
+    EXPECT_EQ(CL_SUCCESS, retVal);
+    EXPECT_EQ(1u, csr.createAllocationForHostSurfaceCalled);
+
+    retVal = queue.enqueueReadBuffer(bufferForRead.get(), CL_TRUE, 0, bufferForRead->getSize(), mappedPtr, nullptr, 0, 0, nullptr);
+    EXPECT_EQ(CL_SUCCESS, retVal);
+    EXPECT_EQ(1u, csr.createAllocationForHostSurfaceCalled);
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2022 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -15,7 +15,6 @@
 #include "opencl/source/cl_device/cl_device.h"
 #include "opencl/source/command_queue/command_queue.h"
 #include "opencl/source/command_queue/gpgpu_walker.h"
-#include "opencl/source/device_queue/device_queue_hw.h"
 #include "opencl/source/helpers/dispatch_info.h"
 #include "opencl/source/helpers/queue_helpers.h"
 #include "opencl/source/mem_obj/mem_obj.h"
@@ -36,13 +35,13 @@ class CommandQueueHw : public CommandQueue {
     CommandQueueHw(Context *context,
                    ClDevice *device,
                    const cl_queue_properties *properties,
-                   bool internalUsage) : BaseClass(context, device, properties) {
+                   bool internalUsage) : BaseClass(context, device, properties, internalUsage) {
 
         auto clPriority = getCmdQueueProperties<cl_queue_priority_khr>(properties, CL_QUEUE_PRIORITY_KHR);
 
         if (clPriority & static_cast<cl_queue_priority_khr>(CL_QUEUE_PRIORITY_LOW_KHR)) {
             priority = QueuePriority::LOW;
-            this->gpgpuEngine = &device->getDeviceById(0)->getEngine(HwHelperHw<GfxFamily>::lowPriorityEngineType, true);
+            this->gpgpuEngine = &device->getNearestGenericSubDevice(0)->getEngine(getChosenEngineType(device->getHardwareInfo()), EngineUsage::LowPriority);
         } else if (clPriority & static_cast<cl_queue_priority_khr>(CL_QUEUE_PRIORITY_MED_KHR)) {
             priority = QueuePriority::MEDIUM;
         } else if (clPriority & static_cast<cl_queue_priority_khr>(CL_QUEUE_PRIORITY_HIGH_KHR)) {
@@ -63,6 +62,20 @@ class CommandQueueHw : public CommandQueue {
             this->gpgpuEngine = &device->getInternalEngine();
         }
 
+        auto &hwInfo = device->getDevice().getHardwareInfo();
+        auto &hwHelper = NEO::HwHelper::get(hwInfo.platform.eRenderCoreFamily);
+
+        auto assignEngineRoundRobin =
+            !internalUsage &&
+            !this->queueFamilySelected &&
+            !(clPriority & static_cast<cl_queue_priority_khr>(CL_QUEUE_PRIORITY_LOW_KHR)) &&
+            hwHelper.isAssignEngineRoundRobinSupported() &&
+            this->isAssignEngineRoundRobinEnabled();
+
+        if (assignEngineRoundRobin) {
+            this->gpgpuEngine = &device->getDevice().getNextEngineForCommandQueue();
+        }
+
         if (getCmdQueueProperties<cl_queue_properties>(properties, CL_QUEUE_PROPERTIES) & static_cast<cl_queue_properties>(CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE)) {
             getGpgpuCommandStreamReceiver().overrideDispatchPolicy(DispatchMode::BatchedDispatch);
             if (DebugManager.flags.CsrDispatchMode.get() != 0) {
@@ -71,9 +84,30 @@ class CommandQueueHw : public CommandQueue {
             getGpgpuCommandStreamReceiver().enableNTo1SubmissionModel();
         }
 
+        if (device->getDevice().getDebugger() && !getGpgpuCommandStreamReceiver().getDebugSurfaceAllocation()) {
+            auto debugSurface = getGpgpuCommandStreamReceiver().allocateDebugSurface(SipKernel::maxDbgSurfaceSize);
+            memset(debugSurface->getUnderlyingBuffer(), 0, debugSurface->getUnderlyingBufferSize());
+
+            auto &stateSaveAreaHeader = SipKernel::getSipKernel(device->getDevice()).getStateSaveAreaHeader();
+            if (stateSaveAreaHeader.size() > 0) {
+                NEO::MemoryTransferHelper::transferMemoryToAllocation(hwHelper.isBlitCopyRequiredForLocalMemory(hwInfo, *debugSurface),
+                                                                      device->getDevice(), debugSurface, 0, stateSaveAreaHeader.data(),
+                                                                      stateSaveAreaHeader.size());
+            }
+        }
+
         uint64_t requestedSliceCount = getCmdQueueProperties<cl_command_queue_properties>(properties, CL_QUEUE_SLICE_COUNT_INTEL);
         if (requestedSliceCount > 0) {
             sliceCount = requestedSliceCount;
+        }
+
+        gpgpuEngine->osContext->ensureContextInitialized();
+        gpgpuEngine->commandStreamReceiver->initDirectSubmission(device->getDevice(), *gpgpuEngine->osContext);
+        for (const EngineControl *engine : bcsEngines) {
+            if (engine != nullptr) {
+                engine->osContext->ensureContextInitialized();
+                engine->commandStreamReceiver->initDirectSubmission(device->getDevice(), *engine->osContext);
+            }
         }
     }
 
@@ -86,6 +120,7 @@ class CommandQueueHw : public CommandQueue {
 
     MOCKABLE_VIRTUAL void notifyEnqueueReadBuffer(Buffer *buffer, bool blockingRead, bool notifyBcsCsr);
     MOCKABLE_VIRTUAL void notifyEnqueueReadImage(Image *image, bool blockingRead, bool notifyBcsCsr);
+    MOCKABLE_VIRTUAL void notifyEnqueueSVMMemcpy(GraphicsAllocation *gfxAllocation, bool blockingCopy, bool notifyBcsCsr);
 
     cl_int enqueueBarrierWithWaitList(cl_uint numEventsInWaitList,
                                       const cl_event *eventWaitList,
@@ -115,9 +150,9 @@ class CommandQueueHw : public CommandQueue {
 
     cl_int enqueueCopyImage(Image *srcImage,
                             Image *dstImage,
-                            const size_t srcOrigin[3],
-                            const size_t dstOrigin[3],
-                            const size_t region[3],
+                            const size_t *srcOrigin,
+                            const size_t *dstOrigin,
+                            const size_t *region,
                             cl_uint numEventsInWaitList,
                             const cl_event *eventWaitList,
                             cl_event *event) override;
@@ -139,7 +174,7 @@ class CommandQueueHw : public CommandQueue {
                             const cl_event *eventWaitList,
                             cl_event *event) override;
 
-    cl_int enqueueKernel(cl_kernel kernel,
+    cl_int enqueueKernel(Kernel *kernel,
                          cl_uint workDim,
                          const size_t *globalWorkOffset,
                          const size_t *globalWorkSize,
@@ -305,10 +340,6 @@ class CommandQueueHw : public CommandQueue {
                                   cl_event *event) override;
 
     cl_int finish() override;
-    cl_int enqueueInitDispatchGlobals(DispatchGlobalsArgs *dispatchGlobalsArgs,
-                                      cl_uint numEventsInWaitList,
-                                      const cl_event *eventWaitList,
-                                      cl_event *event) override;
     cl_int flush() override;
 
     template <uint32_t enqueueType>
@@ -343,19 +374,27 @@ class CommandQueueHw : public CommandQueue {
                         const cl_event *eventWaitList,
                         cl_event *event);
 
+    template <uint32_t cmdType, size_t surfaceCount>
+    void dispatchBcsOrGpgpuEnqueue(MultiDispatchInfo &dispatchInfo, Surface *(&surfaces)[surfaceCount], EBuiltInOps::Type builtInOperation, cl_uint numEventsInWaitList, const cl_event *eventWaitList, cl_event *event, bool blocking, CommandStreamReceiver &csr);
+
+    template <uint32_t cmdType>
+    void enqueueBlit(const MultiDispatchInfo &multiDispatchInfo, cl_uint numEventsInWaitList, const cl_event *eventWaitList, cl_event *event, bool blocking, CommandStreamReceiver &bcsCsr);
+
     template <uint32_t commandType>
     CompletionStamp enqueueNonBlocked(Surface **surfacesForResidency,
                                       size_t surfaceCount,
                                       LinearStream &commandStream,
                                       size_t commandStreamStart,
                                       bool &blocking,
+                                      bool clearDependenciesForSubCapture,
                                       const MultiDispatchInfo &multiDispatchInfo,
                                       const EnqueueProperties &enqueueProperties,
                                       TimestampPacketDependencies &timestampPacketDependencies,
                                       EventsRequest &eventsRequest,
                                       EventBuilder &eventBuilder,
                                       uint32_t taskLevel,
-                                      PrintfHandler *printfHandler);
+                                      PrintfHandler *printfHandler,
+                                      CommandStreamReceiver *bcsCsr);
 
     void enqueueBlocked(uint32_t commandType,
                         Surface **surfacesForResidency,
@@ -366,26 +405,38 @@ class CommandQueueHw : public CommandQueue {
                         const EnqueueProperties &enqueueProperties,
                         EventsRequest &eventsRequest,
                         EventBuilder &externalEventBuilder,
-                        std::unique_ptr<PrintfHandler> printfHandler);
+                        std::unique_ptr<PrintfHandler> &&printfHandler,
+                        CommandStreamReceiver *bcsCsr);
 
     CompletionStamp enqueueCommandWithoutKernel(Surface **surfaces,
                                                 size_t surfaceCount,
-                                                LinearStream &commandStream,
+                                                LinearStream *commandStream,
                                                 size_t commandStreamStart,
                                                 bool &blocking,
                                                 const EnqueueProperties &enqueueProperties,
                                                 TimestampPacketDependencies &timestampPacketDependencies,
                                                 EventsRequest &eventsRequest,
                                                 EventBuilder &eventBuilder,
-                                                uint32_t taskLevel);
+                                                uint32_t taskLevel,
+                                                CsrDependencies &csrDeps,
+                                                CommandStreamReceiver *bcsCsr);
     void processDispatchForCacheFlush(Surface **surfaces,
                                       size_t numSurfaces,
                                       LinearStream *commandStream,
                                       CsrDependencies &csrDeps);
-    BlitProperties processDispatchForBlitEnqueue(const MultiDispatchInfo &multiDispatchInfo,
+    void processDispatchForMarker(CommandQueue &commandQueue,
+                                  LinearStream *commandStream,
+                                  EventsRequest &eventsRequest,
+                                  CsrDependencies &csrDeps);
+    void processDispatchForMarkerWithTimestampPacket(CommandQueue &commandQueue,
+                                                     LinearStream *commandStream,
+                                                     EventsRequest &eventsRequest,
+                                                     CsrDependencies &csrDeps);
+    BlitProperties processDispatchForBlitEnqueue(CommandStreamReceiver &blitCommandStreamReceiver,
+                                                 const MultiDispatchInfo &multiDispatchInfo,
                                                  TimestampPacketDependencies &timestampPacketDependencies,
                                                  const EventsRequest &eventsRequest,
-                                                 LinearStream &commandStream,
+                                                 LinearStream *commandStream,
                                                  uint32_t commandType, bool queueBlocked);
     void submitCacheFlush(Surface **surfaces,
                           size_t numSurfaces,
@@ -393,6 +444,8 @@ class CommandQueueHw : public CommandQueue {
                           uint64_t postSyncAddress);
 
     bool isCacheFlushCommand(uint32_t commandType) const override;
+
+    bool waitForTimestamps(uint32_t taskCount) override;
 
     MOCKABLE_VIRTUAL bool isCacheFlushForBcsRequired() const;
 
@@ -418,13 +471,13 @@ class CommandQueueHw : public CommandQueue {
     LinearStream *obtainCommandStream(const CsrDependencies &csrDependencies, bool blitEnqueue, bool blockedQueue,
                                       const MultiDispatchInfo &multiDispatchInfo, const EventsRequest &eventsRequest,
                                       std::unique_ptr<KernelOperation> &blockedCommandsData,
-                                      Surface **surfaces, size_t numSurfaces) {
+                                      Surface **surfaces, size_t numSurfaces, bool isMarkerWithProfiling) {
         LinearStream *commandStream = nullptr;
 
         bool profilingRequired = (this->isProfilingEnabled() && eventsRequest.outEvent);
         bool perfCountersRequired = (this->isPerfCountersEnabled() && eventsRequest.outEvent);
 
-        if (isBlockedCommandStreamRequired(commandType, eventsRequest, blockedQueue)) {
+        if (isBlockedCommandStreamRequired(commandType, eventsRequest, blockedQueue, isMarkerWithProfiling)) {
             constexpr size_t additionalAllocationSize = CSRequirements::csOverfetchSize;
             constexpr size_t allocationSize = MemoryConstants::pageSize64k - CSRequirements::csOverfetchSize;
             commandStream = new LinearStream();
@@ -435,12 +488,12 @@ class CommandQueueHw : public CommandQueue {
             blockedCommandsData = std::make_unique<KernelOperation>(commandStream, *gpgpuCsr.getInternalAllocationStorage());
         } else {
             commandStream = &getCommandStream<GfxFamily, commandType>(*this, csrDependencies, profilingRequired, perfCountersRequired,
-                                                                      blitEnqueue, multiDispatchInfo, surfaces, numSurfaces);
+                                                                      blitEnqueue, multiDispatchInfo, surfaces, numSurfaces, isMarkerWithProfiling, eventsRequest.numEventsInWaitList > 0);
         }
         return commandStream;
     }
 
-    void processDispatchForBlitAuxTranslation(const MultiDispatchInfo &multiDispatchInfo, BlitPropertiesContainer &blitPropertiesContainer,
+    void processDispatchForBlitAuxTranslation(CommandStreamReceiver &bcsCsr, const MultiDispatchInfo &multiDispatchInfo, BlitPropertiesContainer &blitPropertiesContainer,
                                               TimestampPacketDependencies &timestampPacketDependencies, const EventsRequest &eventsRequest,
                                               bool queueBlocked);
 
@@ -448,8 +501,6 @@ class CommandQueueHw : public CommandQueue {
 
     bool isTaskLevelUpdateRequired(const uint32_t &taskLevel, const cl_event *eventWaitList, const cl_uint &numEventsInWaitList, unsigned int commandType);
     void obtainTaskLevelAndBlockedStatus(unsigned int &taskLevel, cl_uint &numEventsInWaitList, const cl_event *&eventWaitList, bool &blockQueueStatus, unsigned int commandType) override;
-    void forceDispatchScheduler(NEO::MultiDispatchInfo &multiDispatchInfo);
-    void runSchedulerSimulation(DeviceQueueHw<GfxFamily> &devQueueHw, Kernel &parentKernel);
     static void computeOffsetsValueForRectCommands(size_t *bufferOffset,
                                                    size_t *hostOffset,
                                                    const size_t *bufferOrigin,
@@ -459,22 +510,20 @@ class CommandQueueHw : public CommandQueue {
                                                    size_t bufferSlicePitch,
                                                    size_t hostRowPitch,
                                                    size_t hostSlicePitch);
-    void processDeviceEnqueue(DeviceQueueHw<GfxFamily> *devQueueHw,
-                              const MultiDispatchInfo &multiDispatchInfo,
-                              TagNode<HwTimeStamps> *hwTimeStamps,
-                              bool &blocking);
 
     template <uint32_t commandType>
     void processDispatchForKernels(const MultiDispatchInfo &multiDispatchInfo,
                                    std::unique_ptr<PrintfHandler> &printfHandler,
                                    Event *event,
-                                   TagNode<NEO::HwTimeStamps> *&hwTimeStamps,
+                                   TagNodeBase *&hwTimeStamps,
                                    bool blockQueue,
-                                   DeviceQueueHw<GfxFamily> *devQueueHw,
                                    CsrDependencies &csrDeps,
                                    KernelOperation *blockedCommandsData,
                                    TimestampPacketDependencies &timestampPacketDependencies);
 
-    bool isGpgpuSubmissionForBcsRequired(bool queueBlocked) const;
+    bool isGpgpuSubmissionForBcsRequired(bool queueBlocked, TimestampPacketDependencies &timestampPacketDependencies) const;
+    void setupEvent(EventBuilder &eventBuilder, cl_event *outEvent, uint32_t cmdType);
+
+    bool isBlitAuxTranslationRequired(const MultiDispatchInfo &multiDispatchInfo);
 };
 } // namespace NEO

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018-2020 Intel Corporation
+ * Copyright (C) 2019-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -7,7 +7,7 @@
 
 #include "shared/source/command_stream/csr_definitions.h"
 #include "shared/source/helpers/pipeline_select_helper.h"
-#include "shared/source/helpers/preamble_bdw_plus.inl"
+#include "shared/source/helpers/preamble_bdw_and_later.inl"
 
 #include "reg_configs_common.h"
 
@@ -50,22 +50,17 @@ void PreambleHelper<ICLFamily>::programPipelineSelect(LinearStream *pCommandStre
 }
 
 template <>
-void PreambleHelper<ICLFamily>::addPipeControlBeforeVfeCmd(LinearStream *pCommandStream, const HardwareInfo *hwInfo, aub_stream::EngineType engineType) {
+void PreambleHelper<ICLFamily>::addPipeControlBeforeVfeCmd(LinearStream *pCommandStream, const HardwareInfo *hwInfo, EngineGroupType engineGroupType) {
     auto pipeControl = pCommandStream->getSpaceForCmd<PIPE_CONTROL>();
     PIPE_CONTROL cmd = ICLFamily::cmdInitPipeControl;
     cmd.setCommandStreamerStallEnable(true);
 
-    if (hwInfo->workaroundTable.waSendMIFLUSHBeforeVFE) {
+    if (hwInfo->workaroundTable.flags.waSendMIFLUSHBeforeVFE) {
         cmd.setRenderTargetCacheFlushEnable(true);
         cmd.setDepthCacheFlushEnable(true);
         cmd.setDcFlushEnable(true);
     }
     *pipeControl = cmd;
-}
-
-template <>
-uint32_t PreambleHelper<ICLFamily>::getDefaultThreadArbitrationPolicy() {
-    return ThreadArbitrationPolicy::RoundRobinAfterDependency;
 }
 
 template <>
@@ -77,13 +72,10 @@ void PreambleHelper<ICLFamily>::programThreadArbitration(LinearStream *pCommandS
     cmd.setCommandStreamerStallEnable(true);
     *pipeControl = cmd;
 
-    auto pCmd = pCommandStream->getSpaceForCmd<MI_LOAD_REGISTER_IMM>();
-    MI_LOAD_REGISTER_IMM lriCmd = ICLFamily::cmdInitLoadRegisterImm;
-
-    lriCmd.setRegisterOffset(RowChickenReg4::address);
-    lriCmd.setDataDword(RowChickenReg4::regDataForArbitrationPolicy[requiredThreadArbitrationPolicy]);
-
-    *pCmd = lriCmd;
+    LriHelper<ICLFamily>::program(pCommandStream,
+                                  RowChickenReg4::address,
+                                  RowChickenReg4::regDataForArbitrationPolicy[requiredThreadArbitrationPolicy],
+                                  false);
 }
 
 template <>
@@ -92,9 +84,20 @@ size_t PreambleHelper<ICLFamily>::getThreadArbitrationCommandsSize() {
 }
 
 template <>
+std::vector<uint32_t> PreambleHelper<ICLFamily>::getSupportedThreadArbitrationPolicies() {
+    std::vector<uint32_t> retVal;
+    size_t policySize = sizeof(RowChickenReg4::regDataForArbitrationPolicy) /
+                        sizeof(RowChickenReg4::regDataForArbitrationPolicy[0]);
+    for (uint32_t i = 0u; i < policySize; i++) {
+        retVal.push_back(i);
+    }
+    return retVal;
+}
+template <>
 size_t PreambleHelper<ICLFamily>::getAdditionalCommandsSize(const Device &device) {
     size_t totalSize = PreemptionHelper::getRequiredPreambleSize<ICLFamily>(device);
-    totalSize += getKernelDebuggingCommandsSize(device.isDebuggerActive());
+    bool debuggingEnabled = device.getDebugger() != nullptr || device.isDebuggerActive();
+    totalSize += getKernelDebuggingCommandsSize(debuggingEnabled);
     return totalSize;
 }
 

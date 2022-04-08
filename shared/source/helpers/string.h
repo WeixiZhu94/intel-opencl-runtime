@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -90,6 +90,28 @@ inline int memmove_s(void *dst, size_t numberOfElements, const void *src, size_t
     memmove(dst, src, count);
 
     return 0;
+}
+
+template <typename... Args>
+inline int snprintf_s(char *buffer, size_t sizeOfBuffer, size_t count, const char *format, Args &&...args) {
+    if ((buffer == nullptr) || (format == nullptr)) {
+        return -EINVAL;
+    }
+
+    return snprintf(buffer, sizeOfBuffer, format, std::forward<Args>(args)...);
+}
+
+#endif
+
+#if defined(_WIN32)
+
+template <typename... Args>
+inline int snprintf_s(char *buffer, size_t sizeOfBuffer, size_t count, const char *format, Args &&...args) {
+    if ((buffer == nullptr) || (format == nullptr)) {
+        return -EINVAL;
+    }
+
+    return _snprintf_s(buffer, sizeOfBuffer, count, format, std::forward<Args>(args)...);
 }
 
 #endif

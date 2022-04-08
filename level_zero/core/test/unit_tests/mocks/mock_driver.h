@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019-2020 Intel Corporation
+ * Copyright (C) 2020-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -26,19 +26,13 @@ struct Mock<Driver> : public Driver {
     Mock();
     ~Mock() override;
 
-    MOCK_METHOD(ze_result_t,
-                driverInit,
-                (ze_init_flag_t),
-                (override));
-    MOCK_METHOD(void,
-                initialize,
-                (bool *result),
-                (override));
-
-    ze_result_t mockInit(ze_init_flag_t) { return this->DriverImp::driverInit(ZE_INIT_FLAG_NONE); }
-    void mockInitialize(bool *result) { *result = true; }
+    ze_result_t driverInit(ze_init_flags_t flag) override {
+        initCalledCount++;
+        return ZE_RESULT_SUCCESS;
+    }
 
     Driver *previousDriver = nullptr;
+    uint32_t initCalledCount = 0;
 };
 
 } // namespace ult

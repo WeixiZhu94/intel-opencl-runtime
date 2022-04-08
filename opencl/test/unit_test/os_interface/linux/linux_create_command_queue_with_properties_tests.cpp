@@ -1,20 +1,20 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2019-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
  */
 
 #include "shared/source/os_interface/linux/drm_memory_operations_handler.h"
-#include "shared/source/os_interface/linux/os_interface.h"
+#include "shared/source/os_interface/os_interface.h"
+#include "shared/test/common/libult/linux/drm_mock.h"
+#include "shared/test/common/mocks/linux/mock_drm_command_stream_receiver.h"
+#include "shared/test/common/mocks/linux/mock_drm_memory_manager.h"
+#include "shared/test/common/test_macros/test.h"
 
 #include "opencl/source/command_queue/command_queue_hw.h"
 #include "opencl/test/unit_test/fixtures/ult_command_stream_receiver_fixture.h"
-#include "opencl/test/unit_test/mocks/linux/mock_drm_command_stream_receiver.h"
-#include "opencl/test/unit_test/mocks/linux/mock_drm_memory_manager.h"
 #include "opencl/test/unit_test/mocks/mock_context.h"
-#include "opencl/test/unit_test/os_interface/linux/drm_mock.h"
-#include "test.h"
 
 using namespace NEO;
 
@@ -23,10 +23,12 @@ struct clCreateCommandQueueWithPropertiesLinux : public UltCommandStreamReceiver
         UltCommandStreamReceiverTest::SetUp();
         ExecutionEnvironment *executionEnvironment = new MockExecutionEnvironment();
         executionEnvironment->prepareRootDeviceEnvironments(1);
+        drm = new DrmMock(*executionEnvironment->rootDeviceEnvironments[0]);
+
         auto osInterface = new OSInterface();
-        osInterface->get()->setDrm(drm);
+        osInterface->setDriverModel(std::unique_ptr<DriverModel>(drm));
         executionEnvironment->rootDeviceEnvironments[rootDeviceIndex]->osInterface.reset(osInterface);
-        executionEnvironment->rootDeviceEnvironments[rootDeviceIndex]->memoryOperationsInterface = DrmMemoryOperationsHandler::create();
+        executionEnvironment->rootDeviceEnvironments[rootDeviceIndex]->memoryOperationsInterface = DrmMemoryOperationsHandler::create(*drm, rootDeviceIndex);
         executionEnvironment->memoryManager.reset(new TestedDrmMemoryManager(*executionEnvironment));
         mdevice = std::make_unique<MockClDevice>(MockDevice::create<MockDevice>(executionEnvironment, rootDeviceIndex));
 
@@ -37,7 +39,7 @@ struct clCreateCommandQueueWithPropertiesLinux : public UltCommandStreamReceiver
     void TearDown() override {
         UltCommandStreamReceiverTest::TearDown();
     }
-    DrmMock *drm = new DrmMock();
+    DrmMock *drm = nullptr;
     std::unique_ptr<MockClDevice> mdevice = nullptr;
     std::unique_ptr<Context> context;
     cl_device_id clDevice = nullptr;
@@ -113,7 +115,8 @@ HWTEST_F(clCreateCommandQueueWithPropertiesLinux, givenPropertiesWithClQueueSlic
 
     cl_queue_properties properties[] = {CL_QUEUE_SLICE_COUNT_INTEL, newSliceCount, 0};
 
-    auto mockCsr = new TestedDrmCommandStreamReceiver<FamilyType>(*mdevice->executionEnvironment, rootDeviceIndex);
+    auto mockCsr = new TestedDrmCommandStreamReceiver<FamilyType>(*mdevice->executionEnvironment, rootDeviceIndex, 1);
+    mockCsr->callHwFlush = false;
     mdevice->resetCommandStreamReceiver(mockCsr);
 
     cl_command_queue cmdQ = clCreateCommandQueueWithProperties(context.get(), clDevice, properties, &retVal);
@@ -158,7 +161,8 @@ HWTEST_F(clCreateCommandQueueWithPropertiesLinux, givenSameSliceCountAsRecentlyS
 
     cl_queue_properties properties[] = {CL_QUEUE_SLICE_COUNT_INTEL, newSliceCount, 0};
 
-    auto mockCsr = new TestedDrmCommandStreamReceiver<FamilyType>(*mdevice->executionEnvironment, rootDeviceIndex);
+    auto mockCsr = new TestedDrmCommandStreamReceiver<FamilyType>(*mdevice->executionEnvironment, rootDeviceIndex, 1);
+    mockCsr->callHwFlush = false;
     mdevice->resetCommandStreamReceiver(mockCsr);
 
     cl_command_queue cmdQ = clCreateCommandQueueWithProperties(context.get(), clDevice, properties, &retVal);
@@ -202,7 +206,8 @@ HWTEST_F(clCreateCommandQueueWithPropertiesLinux, givenPropertiesWithClQueueSlic
 
     cl_queue_properties properties[] = {CL_QUEUE_SLICE_COUNT_INTEL, newSliceCount, 0};
 
-    auto mockCsr = new TestedDrmCommandStreamReceiver<FamilyType>(*mdevice->executionEnvironment, rootDeviceIndex);
+    auto mockCsr = new TestedDrmCommandStreamReceiver<FamilyType>(*mdevice->executionEnvironment, rootDeviceIndex, 1);
+    mockCsr->callHwFlush = false;
     mdevice->resetCommandStreamReceiver(mockCsr);
 
     cl_command_queue cmdQ = clCreateCommandQueueWithProperties(context.get(), clDevice, properties, &retVal);
@@ -215,7 +220,7 @@ HWTEST_F(clCreateCommandQueueWithPropertiesLinux, givenPropertiesWithClQueueSlic
 
     DispatchFlags dispatchFlags = DispatchFlagsHelper::createDefaultDispatchFlags();
     dispatchFlags.sliceCount = commandQueue->getSliceCount();
-    drm->StoredRetValForSetSSEU = -1;
+    drm->storedRetValForSetSSEU = -1;
 
     auto lastSliceCountBeforeFlushTask = mockCsr->lastSentSliceCount;
     mockCsr->flushTask(commandStream,

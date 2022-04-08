@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -7,14 +7,14 @@
 
 #include "shared/source/gmm_helper/gmm.h"
 #include "shared/source/gmm_helper/resource_info.h"
+#include "shared/test/common/mocks/mock_memory_manager.h"
+#include "shared/test/common/test_macros/test.h"
 
 #include "opencl/source/cl_device/cl_device.h"
 #include "opencl/source/mem_obj/buffer.h"
 #include "opencl/source/sharings/gl/gl_buffer.h"
 #include "opencl/test/unit_test/mocks/gl/windows/mock_gl_sharing_windows.h"
 #include "opencl/test/unit_test/mocks/mock_context.h"
-#include "opencl/test/unit_test/mocks/mock_memory_manager.h"
-#include "test.h"
 
 using namespace NEO;
 
@@ -40,7 +40,7 @@ struct GlReusedBufferTests : public ::testing::Test {
 
 class FailingMemoryManager : public MockMemoryManager {
   public:
-    GraphicsAllocation *createGraphicsAllocationFromSharedHandle(osHandle handle, const AllocationProperties &properties, bool requireSpecificBitness) override {
+    GraphicsAllocation *createGraphicsAllocationFromSharedHandle(osHandle handle, const AllocationProperties &properties, bool requireSpecificBitness, bool isHostIpcAllocation) override {
         return nullptr;
     }
 };
@@ -87,7 +87,7 @@ TEST_F(GlReusedBufferTests, givenMultipleBuffersWithReusedAllocationWhenReleasin
 
 TEST_F(GlReusedBufferTests, givenMultipleBuffersWithReusedAllocationWhenCreatingThenReuseGmmResourceToo) {
     std::unique_ptr<Buffer> glBuffer1(GlBuffer::createSharedGlBuffer(&context, CL_MEM_READ_WRITE, bufferId1, &retVal));
-    glBuffer1->getGraphicsAllocation(rootDeviceIndex)->setDefaultGmm(new Gmm(context.getDevice(0)->getGmmClientContext(), (void *)0x100, 1, false));
+    glBuffer1->getGraphicsAllocation(rootDeviceIndex)->setDefaultGmm(new Gmm(context.getDevice(0)->getGmmClientContext(), (void *)0x100, 1, 0, false));
 
     std::unique_ptr<Buffer> glBuffer2(GlBuffer::createSharedGlBuffer(&context, CL_MEM_READ_WRITE, bufferId1, &retVal));
 
@@ -168,7 +168,7 @@ TEST_F(GlReusedBufferTests, givenGlobalShareHandleChangedWhenAcquiringSharedBuff
     glBuffer->release(clBuffer.get(), rootDeviceIndex);
 }
 
-TEST_F(GlReusedBufferTests, givenMultipleBuffersAndGlobalShareHandleChangedWhenAcquiringSharedBufferDeleteOldGfxAllocationFromReuseVector) {
+TEST_F(GlReusedBufferTests, givenMultipleBuffersAndGlobalShareHandleChangedWhenAcquiringSharedBufferThenDeleteOldGfxAllocationFromReuseVector) {
     GlDllHelper dllParam;
     CL_GL_BUFFER_INFO bufferInfoOutput = dllParam.getBufferInfo();
     bufferInfoOutput.globalShareHandle = 40;

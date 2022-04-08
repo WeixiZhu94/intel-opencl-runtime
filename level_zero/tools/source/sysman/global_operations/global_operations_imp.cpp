@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 Intel Corporation
+ * Copyright (C) 2020-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -14,8 +14,8 @@
 
 namespace L0 {
 
-ze_result_t GlobalOperationsImp::processesGetState(uint32_t *pCount, zet_process_state_t *pProcesses) {
-    std::vector<zet_process_state_t> pProcessList;
+ze_result_t GlobalOperationsImp::processesGetState(uint32_t *pCount, zes_process_state_t *pProcesses) {
+    std::vector<zes_process_state_t> pProcessList;
     ze_result_t result = pOsGlobalOperations->scanProcessesState(pProcessList);
     if (result != ZE_RESULT_SUCCESS) {
         return result;
@@ -30,6 +30,7 @@ ze_result_t GlobalOperationsImp::processesGetState(uint32_t *pCount, zet_process
             pProcesses[i].processId = pProcessList[i].processId;
             pProcesses[i].engines = pProcessList[i].engines;
             pProcesses[i].memSize = pProcessList[i].memSize;
+            pProcesses[i].sharedSize = pProcessList[i].sharedSize;
         }
     }
     *pCount = static_cast<uint32_t>(pProcessList.size());
@@ -37,21 +38,24 @@ ze_result_t GlobalOperationsImp::processesGetState(uint32_t *pCount, zet_process
     return result;
 }
 
-ze_result_t GlobalOperationsImp::deviceGetProperties(zet_sysman_properties_t *pProperties) {
-    Device *device = L0::Device::fromHandle(hCoreDevice);
-    ze_device_properties_t deviceProperties;
+ze_result_t GlobalOperationsImp::deviceGetProperties(zes_device_properties_t *pProperties) {
+    Device *device = pOsGlobalOperations->getDevice();
+    ze_device_properties_t deviceProperties = {ZE_STRUCTURE_TYPE_DEVICE_PROPERTIES};
     device->getProperties(&deviceProperties);
     sysmanProperties.core = deviceProperties;
     uint32_t count = 0;
     device->getSubDevices(&count, nullptr);
     sysmanProperties.numSubdevices = count;
-
     *pProperties = sysmanProperties;
     return ZE_RESULT_SUCCESS;
 }
 
-ze_result_t GlobalOperationsImp::reset() {
-    return pOsGlobalOperations->reset();
+ze_result_t GlobalOperationsImp::reset(ze_bool_t force) {
+    return pOsGlobalOperations->reset(force);
+}
+
+ze_result_t GlobalOperationsImp::deviceGetState(zes_device_state_t *pState) {
+    return pOsGlobalOperations->deviceGetState(pState);
 }
 
 void GlobalOperationsImp::init() {

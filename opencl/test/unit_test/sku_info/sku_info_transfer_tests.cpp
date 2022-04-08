@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -17,7 +17,11 @@ TEST(SkuInfoTransferTest, givenFeatureTableWhenFillingStructureForGmmThenCopyOnl
     _SKU_FEATURE_TABLE requestedFtrTable = {};
     _SKU_FEATURE_TABLE refFtrTable = {};
     FeatureTable featureTable;
-    memset(reinterpret_cast<void *>(&featureTable), 1, sizeof(FeatureTable));
+
+    for (auto &e : featureTable.packed) {
+        e = std::numeric_limits<uint32_t>::max();
+    }
+
     SkuInfoTransfer::transferFtrTableForGmm(&requestedFtrTable, &featureTable);
 
     SkuInfoBaseReference::fillReferenceFtrForTransfer(refFtrTable);
@@ -30,7 +34,11 @@ TEST(SkuInfoTransferTest, givenWaTableWhenFillingStructureForGmmThenCopyOnlySele
     _WA_TABLE refWaTable = {};
     WorkaroundTable waTable;
     refWaTable = {};
-    memset(reinterpret_cast<void *>(&waTable), 1, sizeof(WorkaroundTable));
+
+    for (auto &e : waTable.packed) {
+        e = std::numeric_limits<uint32_t>::max();
+    }
+
     SkuInfoTransfer::transferWaTableForGmm(&requestedWaTable, &waTable);
 
     SkuInfoBaseReference::fillReferenceWaForTransfer(refWaTable);

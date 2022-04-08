@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019-2020 Intel Corporation
+ * Copyright (C) 2019-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -13,6 +13,8 @@ namespace NEO {
 struct EngineControl;
 using EngineControlContainer = std::vector<EngineControl>;
 using DeviceBitfield = std::bitset<32>;
+class Device;
+using DeviceVector = std::vector<std::unique_ptr<Device>>;
 
 enum class DebugPauseState : uint32_t {
     disabled,
@@ -22,5 +24,20 @@ enum class DebugPauseState : uint32_t {
     waitingForUserEndConfirmation,
     hasUserEndConfirmation,
     terminate
+};
+
+enum class ColouringPolicy : uint32_t {
+    DeviceCountBased,
+    ChunkSizeBased,
+    MappingBased
+};
+
+class TagTypeBase {
+};
+
+enum class TagNodeType {
+    TimestampPacket,
+    HwTimeStamps,
+    HwPerfCounter
 };
 } // namespace NEO

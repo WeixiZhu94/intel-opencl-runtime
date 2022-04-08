@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2018-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -8,13 +8,14 @@
 #include "shared/source/command_stream/preemption.h"
 #include "shared/source/helpers/hw_helper.h"
 #include "shared/source/memory_manager/graphics_allocation.h"
+#include "shared/test/common/helpers/engine_descriptor_helper.h"
+#include "shared/test/common/mocks/mock_csr.h"
+#include "shared/test/common/test_macros/test.h"
 
 #include "opencl/source/memory_manager/mem_obj_surface.h"
 #include "opencl/source/platform/platform.h"
 #include "opencl/test/unit_test/mocks/mock_buffer.h"
-#include "opencl/test/unit_test/mocks/mock_csr.h"
 #include "opencl/test/unit_test/mocks/mock_platform.h"
-#include "test.h"
 
 #include "gtest/gtest.h"
 
@@ -64,12 +65,11 @@ HWTEST_TYPED_TEST(SurfaceTest, GivenSurfaceWhenInterfaceIsUsedThenSurfaceBehaves
 
     ExecutionEnvironment *executionEnvironment = platform()->peekExecutionEnvironment();
     executionEnvironment->initializeMemoryManager();
-    auto csr = std::make_unique<MockCsr<FamilyType>>(execStamp, *executionEnvironment, 0);
+    DeviceBitfield deviceBitfield(1);
+    auto csr = std::make_unique<MockCsr<FamilyType>>(execStamp, *executionEnvironment, 0, deviceBitfield);
     auto hwInfo = *defaultHwInfo;
     auto engine = HwHelper::get(hwInfo.platform.eRenderCoreFamily).getGpgpuEngineInstances(hwInfo)[0];
-    auto osContext = executionEnvironment->memoryManager->createAndRegisterOsContext(csr.get(), engine, 1,
-                                                                                     PreemptionHelper::getDefaultPreemptionMode(hwInfo),
-                                                                                     false, false, false);
+    auto osContext = executionEnvironment->memoryManager->createAndRegisterOsContext(csr.get(), EngineDescriptorHelper::getDefaultDescriptor(engine, PreemptionHelper::getDefaultPreemptionMode(hwInfo)));
     csr->setupContext(*osContext);
 
     Surface *surface = createSurface::Create<TypeParam>(this->data,
@@ -110,21 +110,21 @@ TEST_F(CoherentMemObjSurface, GivenCoherentMemObjWhenCreatingSurfaceFromMemObjTh
 }
 
 TEST(HostPtrSurfaceTest, givenHostPtrSurfaceWhenCreatedWithoutSpecifyingPtrCopyAllowanceThenPtrCopyIsNotAllowed) {
-    char memory[2];
+    char memory[2] = {};
     HostPtrSurface surface(memory, sizeof(memory));
 
     EXPECT_FALSE(surface.peekIsPtrCopyAllowed());
 }
 
 TEST(HostPtrSurfaceTest, givenHostPtrSurfaceWhenCreatedWithPtrCopyAllowedThenQueryReturnsTrue) {
-    char memory[2];
+    char memory[2] = {};
     HostPtrSurface surface(memory, sizeof(memory), true);
 
     EXPECT_TRUE(surface.peekIsPtrCopyAllowed());
 }
 
 TEST(HostPtrSurfaceTest, givenHostPtrSurfaceWhenCreatedWithPtrCopyNotAllowedThenQueryReturnsFalse) {
-    char memory[2];
+    char memory[2] = {};
     HostPtrSurface surface(memory, sizeof(memory), false);
 
     EXPECT_FALSE(surface.peekIsPtrCopyAllowed());

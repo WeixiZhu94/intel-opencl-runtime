@@ -1,15 +1,166 @@
 /*
- * Copyright (C) 2019-2020 Intel Corporation
+ * Copyright (C) 2020-2022 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
  */
 
+#include "shared/source/execution_environment/root_device_environment.h"
+#include "shared/source/helpers/app_resource_helper.h"
+#include "shared/source/helpers/hw_helper.h"
 #include "shared/source/memory_manager/memory_manager.h"
+
+#include <bitset>
 
 namespace NEO {
 StorageInfo MemoryManager::createStorageInfoFromProperties(const AllocationProperties &properties) {
-    return {};
+    if (properties.subDevicesBitfield.count() == 0) {
+        return {};
+    }
+
+    const auto deviceCount = HwHelper::getSubDevicesCount(executionEnvironment.rootDeviceEnvironments[properties.rootDeviceIndex]->getHardwareInfo());
+    const auto leastOccupiedBank = getLocalMemoryUsageBankSelector(properties.allocationType, properties.rootDeviceIndex)->getLeastOccupiedBank(properties.subDevicesBitfield);
+    const auto subDevicesMask = executionEnvironment.rootDeviceEnvironments[properties.rootDeviceIndex]->deviceAffinityMask.getGenericSubDevicesMask().to_ulong();
+
+    const DeviceBitfield allTilesValue(properties.subDevicesBitfield.count() == 1
+                                           ? maxNBitValue(deviceCount) & subDevicesMask
+                                           : properties.subDevicesBitfield);
+    DeviceBitfield preferredTile;
+    if (properties.subDevicesBitfield.count() == 1) {
+        preferredTile = properties.subDevicesBitfield;
+    } else {
+        UNRECOVERABLE_IF(!properties.subDevicesBitfield.test(leastOccupiedBank));
+        preferredTile.set(leastOccupiedBank);
+    }
+
+    StorageInfo storageInfo{preferredTile, allTilesValue};
+    storageInfo.subDeviceBitfield = properties.subDevicesBitfield;
+    storageInfo.isLockable = GraphicsAllocation::isLockable(properties.allocationType);
+    storageInfo.cpuVisibleSegment = GraphicsAllocation::isCpuAccessRequired(properties.allocationType);
+
+    AppResourceHelper::copyResourceTagStr(storageInfo.resourceTag, properties.allocationType,
+                                          sizeof(storageInfo.resourceTag));
+
+    switch (properties.allocationType) {
+    case GraphicsAllocation::AllocationType::KERNEL_ISA:
+    case GraphicsAllocation::AllocationType::KERNEL_ISA_INTERNAL:
+    case GraphicsAllocation::AllocationType::DEBUG_MODULE_AREA: {
+        auto placeIsaOnMultiTile = (properties.subDevicesBitfield.count() != 1);
+
+        if (executionEnvironment.isDebuggingEnabled()) {
+            placeIsaOnMultiTile = false;
+        }
+
+        if (DebugManager.flags.MultiTileIsaPlacement.get() != -1) {
+            placeIsaOnMultiTile = !!DebugManager.flags.MultiTileIsaPlacement.get();
+        }
+        if (placeIsaOnMultiTile) {
+            storageInfo.cloningOfPageTables = false;
+            storageInfo.memoryBanks = allTilesValue;
+            storageInfo.tileInstanced = true;
+        } else {
+            storageInfo.cloningOfPageTables = true;
+            storageInfo.memoryBanks = preferredTile;
+            storageInfo.tileInstanced = false;
+        }
+    } break;
+    case GraphicsAllocation::AllocationType::DEBUG_CONTEXT_SAVE_AREA:
+    case GraphicsAllocation::AllocationType::WORK_PARTITION_SURFACE:
+        storageInfo.cloningOfPageTables = false;
+        storageInfo.memoryBanks = allTilesValue;
+        storageInfo.tileInstanced = true;
+        break;
+    case GraphicsAllocation::AllocationType::PRIVATE_SURFACE:
+        storageInfo.cloningOfPageTables = false;
+
+        if (properties.subDevicesBitfield.count() == 1) {
+            storageInfo.memoryBanks = preferredTile;
+            storageInfo.pageTablesVisibility = preferredTile;
+        } else {
+            storageInfo.memoryBanks = allTilesValue;
+            storageInfo.tileInstanced = true;
+        }
+        break;
+    case GraphicsAllocation::AllocationType::COMMAND_BUFFER:
+    case GraphicsAllocation::AllocationType::INTERNAL_HEAP:
+    case GraphicsAllocation::AllocationType::LINEAR_STREAM:
+        storageInfo.cloningOfPageTables = properties.flags.multiOsContextCapable;
+        storageInfo.memoryBanks = preferredTile;
+        if (!properties.flags.multiOsContextCapable) {
+            storageInfo.pageTablesVisibility = preferredTile;
+        }
+        break;
+    case GraphicsAllocation::AllocationType::SCRATCH_SURFACE:
+    case GraphicsAllocation::AllocationType::PREEMPTION:
+        if (properties.flags.multiOsContextCapable) {
+            storageInfo.cloningOfPageTables = false;
+            storageInfo.memoryBanks = allTilesValue;
+            storageInfo.tileInstanced = true;
+        } else {
+            storageInfo.memoryBanks = preferredTile;
+            storageInfo.pageTablesVisibility = preferredTile;
+        }
+        break;
+    case GraphicsAllocation::AllocationType::GPU_TIMESTAMP_DEVICE_BUFFER:
+        if (properties.flags.multiOsContextCapable) {
+            storageInfo.cloningOfPageTables = true;
+        } else {
+            storageInfo.pageTablesVisibility = preferredTile;
+            storageInfo.cloningOfPageTables = false;
+        }
+        break;
+    case GraphicsAllocation::AllocationType::BUFFER:
+    case GraphicsAllocation::AllocationType::SVM_GPU: {
+        auto colouringPolicy = properties.colouringPolicy;
+        auto granularity = properties.colouringGranularity;
+
+        if (DebugManager.flags.MultiStoragePolicy.get() != -1) {
+            colouringPolicy = static_cast<ColouringPolicy>(DebugManager.flags.MultiStoragePolicy.get());
+        }
+
+        if (DebugManager.flags.MultiStorageGranularity.get() != -1) {
+            granularity = DebugManager.flags.MultiStorageGranularity.get() * MemoryConstants::kiloByte;
+        }
+
+        DEBUG_BREAK_IF(colouringPolicy == ColouringPolicy::DeviceCountBased && granularity != MemoryConstants::pageSize64k);
+
+        if (this->supportsMultiStorageResources &&
+            properties.multiStorageResource &&
+            properties.size >= deviceCount * granularity &&
+            properties.subDevicesBitfield.count() != 1u) {
+            storageInfo.memoryBanks = allTilesValue;
+            storageInfo.multiStorage = true;
+            storageInfo.colouringPolicy = colouringPolicy;
+            storageInfo.colouringGranularity = granularity;
+            if (DebugManager.flags.OverrideMultiStoragePlacement.get() != -1) {
+                storageInfo.memoryBanks = DebugManager.flags.OverrideMultiStoragePlacement.get();
+            }
+        }
+        if (properties.flags.readOnlyMultiStorage) {
+            storageInfo.readOnlyMultiStorage = true;
+            storageInfo.cloningOfPageTables = false;
+            storageInfo.memoryBanks = allTilesValue;
+            storageInfo.tileInstanced = true;
+        }
+        storageInfo.localOnlyRequired = true;
+
+        if (properties.flags.shareable) {
+            storageInfo.isLockable = false;
+        }
+        break;
+    }
+    case GraphicsAllocation::AllocationType::UNIFIED_SHARED_MEMORY:
+        storageInfo.memoryBanks = allTilesValue;
+        break;
+    default:
+        break;
+    }
+    return storageInfo;
 }
-uint32_t StorageInfo::getNumBanks() const { return 1u; }
+uint32_t StorageInfo::getNumBanks() const {
+    if (memoryBanks == 0) {
+        return 1u;
+    }
+    return static_cast<uint32_t>(memoryBanks.count());
+}
 } // namespace NEO

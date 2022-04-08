@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2020 Intel Corporation
+ * Copyright (C) 2020-2021 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  *
@@ -76,6 +76,10 @@ class HostPtrSurface : public Surface {
 
     bool allowsL3Caching() override {
         return isL3Capable(*gfxAllocation);
+    }
+
+    void setIsPtrCopyAllowed(bool allowed) {
+        this->isPtrCopyAllowed = allowed;
     }
 
   protected:
